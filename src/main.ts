@@ -1,2 +1,339 @@
-/** placeholder; replaced by the shell agent */
-export {};
+/**
+ * main.ts — app shell: DOM wiring, URL hash, generate/render loop, PNG export. Not a generation stage.
+ * RNG stream: none. The only nondeterministic call in the app is crypto.getRandomValues, used here to
+ * mint an 8-letter seed when the URL hash has none (or when Randomize is pressed).
+ * Inputs: location.hash (#seed=<s>&land=<f>&wind=<d>&cells=<r>) and the controls in index.html.
+ * Outputs: the rendered <canvas id="map">, the <pre id="timings"> readout, location.hash on every
+ * generate, and PNG downloads via render/export.
+ */
+import './style.css';
+import type { LayerToggles, PoliticalView, WindDir, World, WorldParams } from './core/types';
+import { DEFAULT_PARAMS } from './core/types';
+import { generate } from './gen/world';
+import { buildPoliticalView } from './gen/features';
+import { renderWorld, DEFAULT_LAYERS } from './render/painter';
+import { exportPng, downloadBlob } from './render/export';
+
+// ---------------------------------------------------------------- constants
+
+const LAYER_KEYS = [
+  'tint', 'relief', 'forests', 'rivers', 'waterlines', 'stipple',
+  'borders', 'provinces', 'settlements', 'labels', 'grid', 'furniture',
+] as const satisfies readonly (keyof LayerToggles)[];
+
+const FONT_TIMEOUT_MS = 1500;
+const FONT_TEXT = '12px "IM Fell English"';
+const FONT_SMALLCAPS = '12px "IM Fell English SC"';
+const WIND_NAMES = ['W', 'NW', 'N', 'NE', 'E', 'SE', 'S', 'SW'] as const;
+const SEED_ALPHABET = 'abcdefghijklmnopqrstuvwxyz';
+
+// ---------------------------------------------------------------- DOM
+
+function byId<T extends HTMLElement>(id: string): T {
+  const el = document.getElementById(id);
+  if (!el) throw new Error('index.html is missing #' + id);
+  return el as T;
+}
+
+const seedInput = byId<HTMLInputElement>('seed');
+const randomizeBtn = byId<HTMLButtonElement>('randomize');
+const generateBtn = byId<HTMLButtonElement>('generate');
+const scaleSelect = byId<HTMLSelectElement>('scale');
+const exportBtn = byId<HTMLButtonElement>('export');
+const timingsPre = byId<HTMLPreElement>('timings');
+const controlsForm = byId<HTMLFormElement>('controls');
+const stage = byId<HTMLElement>('stage');
+const canvas = byId<HTMLCanvasElement>('map');
+const overlay = byId<HTMLElement>('overlay');
+const layerBoxes = {} as Record<keyof LayerToggles, HTMLInputElement>;
+for (const key of LAYER_KEYS) layerBoxes[key] = byId<HTMLInputElement>('layer-' + key);
+
+// ---------------------------------------------------------------- state
+
+let params: WorldParams = { ...DEFAULT_PARAMS, frame: { ...DEFAULT_PARAMS.frame } };
+let world: World | null = null;
+let view: PoliticalView | null = null;
+let fontReady = false;
+let generateMs = 0;
+let renderMs = 0;
+let exportMs = 0;
+let exportBusy = false;
+let lastCanvasW = 0;
+let lastCanvasH = 0;
+
+// ---------------------------------------------------------------- seed and hash
+
+/** 8 lowercase letters from the browser's CSPRNG; the app's only nondeterministic call. */
+function randomSeed(): string {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += SEED_ALPHABET[bytes[i] % SEED_ALPHABET.length];
+  return s;
+}
+
+function parseWind(raw: string | null): WindDir | 'random' | undefined {
+  if (raw === null) return undefined;
+  if (raw === 'random') return 'random';
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= 0 && n <= 7) return n as WindDir;
+  return undefined;
+}
+
+function parseNumber(raw: string | null, lo: number, hi: number): number | undefined {
+  if (raw === null) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.min(hi, Math.max(lo, n));
+}
+
+/** Reads #seed=<s>&land=<f>&wind=<d>&cells=<r>. Missing or malformed values fall back to defaults. */
+function readHash(): { seed: string | null; params: WorldParams } {
+  const q = new URLSearchParams(location.hash.replace(/^#/, ''));
+  const seed = q.get('seed');
+  const next: WorldParams = { ...DEFAULT_PARAMS, frame: { ...DEFAULT_PARAMS.frame } };
+  const land = parseNumber(q.get('land'), 0.05, 0.95);
+  if (land !== undefined) next.landFraction = land;
+  const wind = parseWind(q.get('wind'));
+  if (wind !== undefined) next.windDir = wind;
+  const cells = parseNumber(q.get('cells'), 4, 32);
+  if (cells !== undefined) next.cellSpacing = cells;
+  return { seed: seed !== null && seed.trim() !== '' ? seed.trim() : null, params: next };
+}
+
+function writeHash(seed: string, p: WorldParams): void {
+  const q = new URLSearchParams();
+  q.set('seed', seed);
+  if (p.landFraction !== DEFAULT_PARAMS.landFraction) q.set('land', String(p.landFraction));
+  if (p.windDir !== DEFAULT_PARAMS.windDir) q.set('wind', String(p.windDir));
+  if (p.cellSpacing !== DEFAULT_PARAMS.cellSpacing) q.set('cells', String(p.cellSpacing));
+  const next = '#' + q.toString();
+  if (location.hash !== next) history.replaceState(null, '', next);
+}
+
+// ---------------------------------------------------------------- layers
+
+function readLayers(): LayerToggles {
+  const layers = {} as LayerToggles;
+  for (const key of LAYER_KEYS) layers[key] = layerBoxes[key].checked;
+  return layers;
+}
+
+function applyLayers(layers: LayerToggles): void {
+  for (const key of LAYER_KEYS) layerBoxes[key].checked = layers[key];
+}
+
+// ---------------------------------------------------------------- fonts
+
+/** Resolves true once both Fell faces are usable, false if that takes longer than timeoutMs. */
+function waitForFonts(timeoutMs: number): Promise<boolean> {
+  if (!('fonts' in document)) return Promise.resolve(false);
+  const load = Promise.all([document.fonts.load(FONT_TEXT), document.fonts.load(FONT_SMALLCAPS)])
+    .then((faces) => faces.every((list) => list.length > 0), () => false);
+  const timeout = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs));
+  // If the fonts arrive after the deadline, flip the flag and repaint so labels pick up the real face.
+  void load.then((ok) => {
+    if (ok && !fontReady) {
+      fontReady = true;
+      render();
+    }
+  });
+  return Promise.race([load, timeout]);
+}
+
+// ---------------------------------------------------------------- readout
+
+function fmtMs(ms: number): string {
+  return ms.toFixed(1).padStart(8) + ' ms';
+}
+
+function showTimings(): void {
+  if (!world) return;
+  const p = world.params;
+  const wind = WIND_NAMES[world.geo.windDir] ?? '?';
+  const lines: string[] = [];
+  lines.push('seed   ' + world.seed);
+  lines.push('cells  r=' + p.cellSpacing + '  land ' + p.landFraction + '  wind ' + wind);
+  lines.push('mesh   ' + world.mesh.numRegions + ' cells, ' + world.mesh.numSides + ' sides');
+  lines.push('');
+  lines.push('generate');
+  let sum = 0;
+  for (const [name, ms] of Object.entries(world.timings)) {
+    lines.push('  ' + name.padEnd(12) + fmtMs(ms));
+    sum += ms;
+  }
+  lines.push('  ' + 'stages'.padEnd(12) + fmtMs(sum));
+  lines.push('  ' + 'wall'.padEnd(12) + fmtMs(generateMs));
+  lines.push('');
+  lines.push('render');
+  lines.push('  ' + 'screen'.padEnd(12) + fmtMs(renderMs) + '  ' + canvas.width + 'x' + canvas.height);
+  if (exportMs > 0) lines.push('  ' + 'export'.padEnd(12) + fmtMs(exportMs));
+  lines.push('  ' + 'font'.padEnd(12) + (fontReady ? 'IM Fell English' : 'fallback serif'));
+  timingsPre.classList.remove('error');
+  timingsPre.textContent = lines.join('\n');
+}
+
+function showError(where: string, err: unknown): void {
+  const e = err instanceof Error ? err : new Error(String(err));
+  const seedLine = 'seed   ' + seedInput.value + '\n';
+  timingsPre.classList.add('error');
+  timingsPre.textContent = seedLine + 'error in ' + where + ': ' + e.message + '\n\n' + (e.stack ?? '');
+  console.error('[atlas] ' + where, err);
+}
+
+// ---------------------------------------------------------------- canvas
+
+/** Sizes the canvas to fit #stage at the world's aspect and returns device px per logical px. */
+function fitCanvas(): number {
+  const cs = getComputedStyle(stage);
+  const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+  const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+  const availW = Math.max(64, stage.clientWidth - padX);
+  const availH = Math.max(48, stage.clientHeight - padY);
+  const aspect = params.width / params.height;
+  let cssW = Math.min(availW, availH * aspect);
+  cssW = Math.max(64, Math.floor(cssW));
+  const cssH = Math.floor(cssW / aspect);
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const pxW = Math.round(cssW * dpr);
+  const pxH = Math.round(cssH * dpr);
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  if (canvas.width !== pxW || canvas.height !== pxH) {
+    canvas.width = pxW;
+    canvas.height = pxH;
+  }
+  return pxW / params.width;
+}
+
+function render(): void {
+  if (!world || !view) return;
+  try {
+    const scale = fitCanvas();
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('canvas 2d context unavailable');
+    const t0 = performance.now();
+    renderWorld(world, view, ctx, { scale, layers: readLayers(), fontReady });
+    renderMs = performance.now() - t0;
+    lastCanvasW = canvas.width;
+    lastCanvasH = canvas.height;
+    showTimings();
+  } catch (err) {
+    showError('render', err);
+  }
+}
+
+// ---------------------------------------------------------------- generate
+
+function doGenerate(): void {
+  let seed = seedInput.value.trim();
+  if (seed === '') {
+    seed = randomSeed();
+    seedInput.value = seed;
+  }
+  writeHash(seed, params);
+  generateBtn.disabled = true;
+  try {
+    const t0 = performance.now();
+    world = generate(seed, params);
+    view = buildPoliticalView(world);
+    generateMs = performance.now() - t0;
+    exportMs = 0;
+    document.title = 'Atlas — ' + seed;
+  } catch (err) {
+    world = null;
+    view = null;
+    showError('generate', err);
+    return;
+  } finally {
+    generateBtn.disabled = false;
+  }
+  render();
+}
+
+// ---------------------------------------------------------------- export
+
+/** Lets the overlay paint before the synchronous export render blocks the main thread. */
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+}
+
+async function doExport(): Promise<void> {
+  if (!world || !view || exportBusy) return;
+  const kRaw = Number(scaleSelect.value);
+  const k: 1 | 2 | 4 = kRaw === 1 || kRaw === 2 || kRaw === 4 ? kRaw : 2;
+  exportBusy = true;
+  exportBtn.disabled = true;
+  overlay.hidden = false;
+  try {
+    await nextFrame();
+    if (!fontReady && (await waitForFonts(FONT_TIMEOUT_MS))) fontReady = true;
+    const t0 = performance.now();
+    const blob = await exportPng(world, view, k, { layers: readLayers(), fontReady });
+    exportMs = performance.now() - t0;
+    downloadBlob(blob, 'atlas-' + world.seed + '-' + k + 'x.png');
+    showTimings();
+  } catch (err) {
+    showError('export', err);
+  } finally {
+    overlay.hidden = true;
+    exportBtn.disabled = false;
+    exportBusy = false;
+  }
+}
+
+// ---------------------------------------------------------------- wiring
+
+controlsForm.addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  doGenerate();
+});
+
+randomizeBtn.addEventListener('click', () => {
+  seedInput.value = randomSeed();
+  doGenerate();
+});
+
+exportBtn.addEventListener('click', () => {
+  void doExport();
+});
+
+for (const key of LAYER_KEYS) {
+  layerBoxes[key].addEventListener('change', () => render());
+}
+
+// A pasted or edited hash regenerates without a reload.
+window.addEventListener('hashchange', () => {
+  const h = readHash();
+  params = h.params;
+  if (h.seed !== null) seedInput.value = h.seed;
+  doGenerate();
+});
+
+// Re-fit on layout changes; only repaint when the backing store actually changes size.
+let resizeQueued = false;
+const ro = new ResizeObserver(() => {
+  if (resizeQueued) return;
+  resizeQueued = true;
+  requestAnimationFrame(() => {
+    resizeQueued = false;
+    if (!world) return;
+    fitCanvas();
+    if (canvas.width !== lastCanvasW || canvas.height !== lastCanvasH) render();
+  });
+});
+ro.observe(stage);
+
+// ---------------------------------------------------------------- boot
+
+async function boot(): Promise<void> {
+  applyLayers(DEFAULT_LAYERS);
+  const h = readHash();
+  params = h.params;
+  seedInput.value = h.seed ?? randomSeed();
+  timingsPre.textContent = 'loading fonts...';
+  fontReady = await waitForFonts(FONT_TIMEOUT_MS);
+  doGenerate();
+}
+
+void boot();

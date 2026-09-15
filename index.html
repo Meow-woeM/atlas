@@ -2,12 +2,77 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>atlas</title>
+    <meta name="color-scheme" content="light" />
+    <meta name="description" content="Atlas: a seeded, hand-inked fantasy world generator that runs in the browser." />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=IM+Fell+English:ital@0;1&family=IM+Fell+English+SC&display=swap"
+    />
+    <title>Atlas</title>
   </head>
   <body>
-    <div id="app"></div>
+    <aside id="sidebar" aria-label="Controls">
+      <header class="brand">
+        <h1>Atlas</h1>
+        <p class="tagline">Seeded fantasy worlds, inked on parchment.</p>
+      </header>
+
+      <form id="controls" autocomplete="off">
+        <div class="field">
+          <label for="seed">Seed</label>
+          <input id="seed" name="seed" type="text" maxlength="64" spellcheck="false" placeholder="type a seed" />
+        </div>
+
+        <div class="row">
+          <button type="button" id="randomize" title="New random seed, then generate">Randomize</button>
+          <button type="submit" id="generate" class="primary" title="Generate the world for this seed">Generate</button>
+        </div>
+
+        <fieldset id="layers">
+          <legend>Layers</legend>
+          <label><input type="checkbox" id="layer-tint" /> Biome tint</label>
+          <label><input type="checkbox" id="layer-relief" /> Relief</label>
+          <label><input type="checkbox" id="layer-forests" /> Forests</label>
+          <label><input type="checkbox" id="layer-rivers" /> Rivers</label>
+          <label><input type="checkbox" id="layer-waterlines" /> Waterlines</label>
+          <label><input type="checkbox" id="layer-stipple" /> Stipple</label>
+          <label><input type="checkbox" id="layer-borders" /> Borders</label>
+          <label><input type="checkbox" id="layer-provinces" /> Provinces</label>
+          <label><input type="checkbox" id="layer-settlements" /> Settlements</label>
+          <label><input type="checkbox" id="layer-labels" /> Labels</label>
+          <label><input type="checkbox" id="layer-grid" /> Graticule</label>
+          <label><input type="checkbox" id="layer-furniture" /> Furniture</label>
+        </fieldset>
+
+        <div class="field">
+          <label for="scale">Export size</label>
+          <div class="row">
+            <select id="scale" name="scale" title="Export scale (1x = 1024x768)">
+              <option value="1">1x</option>
+              <option value="2" selected>2x</option>
+              <option value="4">4x</option>
+            </select>
+            <button type="button" id="export" title="Download a PNG of the current map">Export PNG</button>
+          </div>
+        </div>
+
+        <pre id="timings" aria-live="polite"></pre>
+      </form>
+
+      <footer class="about">
+        <p>Share a world with its link: the seed lives in the URL hash.</p>
+      </footer>
+    </aside>
+
+    <main id="stage">
+      <canvas id="map" width="1024" height="768" aria-label="Generated map"></canvas>
+      <div id="overlay" hidden><span>Rendering&hellip;</span></div>
+    </main>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
