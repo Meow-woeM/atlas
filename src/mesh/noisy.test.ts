@@ -15,55 +15,58 @@ function make(params: WorldParams, seed: string): { mesh: Mesh; edges: NoisyEdge
   return { mesh, edges };
 }
 
+/**
+ * Path/twin consistency for every side, checked with plain counters and one expect at the end (the
+ * default mesh has ~60k sides; per-element vitest expects would take ~25 s).
+ */
 function checkEdges(mesh: Mesh, edges: NoisyEdges, cellSpacing: number): void {
+  const problems: string[] = [];
+  const check = (ok: boolean, what: string): void => {
+    if (!ok && problems.length < 20) problems.push(what);
+  };
   const a: number[] = [];
   const b: number[] = [];
   for (let s = 0; s < mesh.numSides; s++) {
     const o = mesh.s_opposite_s[s];
     if (o < 0) {
-      expect(edges.s_pathStart[s]).toBe(-1);
+      check(edges.s_pathStart[s] === -1, `hull side ${s} has a path`);
       a.length = 0;
       sidePath(edges, mesh, s, a);
-      expect(a.length).toBe(2);
-      expect(a[0]).toBe(mesh.t_x[s_inner_t(s)]);
+      check(a.length === 2 && a[0] === mesh.t_x[s_inner_t(s)], `hull side ${s} path is not its inner corner`);
       continue;
     }
-    expect(edges.s_pathStart[s]).toBeGreaterThanOrEqual(0);
-    expect(edges.s_pathLen[s]).toBe(5);
-    expect(edges.s_pathStart[s]).toBe(edges.s_pathStart[o]);
+    check(edges.s_pathStart[s] >= 0, `side ${s} has no path`);
+    check(edges.s_pathLen[s] === 5, `side ${s} path has ${edges.s_pathLen[s]} points`);
+    check(edges.s_pathStart[s] === edges.s_pathStart[o], `side ${s} and twin ${o} store different paths`);
 
     a.length = 0; b.length = 0;
     sidePath(edges, mesh, s, a);
     sidePath(edges, mesh, o, b);
-    expect(a.length).toBe(10);
-    expect(b.length).toBe(10);
+    check(a.length === 10 && b.length === 10, `side ${s} path length ${a.length}/${b.length}`);
     // Endpoints are the corners.
     const tIn = s_inner_t(s), tOut = s_outer_t(mesh, s);
-    expect(a[0]).toBe(mesh.t_x[tIn]);
-    expect(a[1]).toBe(mesh.t_y[tIn]);
-    expect(a[8]).toBe(mesh.t_x[tOut]);
-    expect(a[9]).toBe(mesh.t_y[tOut]);
+    check(a[0] === mesh.t_x[tIn] && a[1] === mesh.t_y[tIn], `side ${s} path does not start at its inner corner`);
+    check(a[8] === mesh.t_x[tOut] && a[9] === mesh.t_y[tOut], `side ${s} path does not end at its outer corner`);
     // Twin is the exact reverse.
+    let reversed = true;
     for (let i = 0; i < 5; i++) {
-      expect(b[2 * i]).toBe(a[2 * (4 - i)]);
-      expect(b[2 * i + 1]).toBe(a[2 * (4 - i) + 1]);
+      if (b[2 * i] !== a[2 * (4 - i)] || b[2 * i + 1] !== a[2 * (4 - i) + 1]) reversed = false;
     }
+    check(reversed, `twin ${o} is not the reverse of side ${s}`);
     // Interior points stay inside the quad's bounding box (the quad is convex-ish; use a loose box).
     const ra = mesh.s_start_r[s], rb = s_end_r(mesh, s);
-    const xs = [mesh.t_x[tIn], mesh.t_x[tOut], mesh.r_x[ra], mesh.r_x[rb]];
-    const ys = [mesh.t_y[tIn], mesh.t_y[tOut], mesh.r_y[ra], mesh.r_y[rb]];
-    const minX = Math.min(...xs) - 1e-3, maxX = Math.max(...xs) + 1e-3;
-    const minY = Math.min(...ys) - 1e-3, maxY = Math.max(...ys) + 1e-3;
+    const minX = Math.min(mesh.t_x[tIn], mesh.t_x[tOut], mesh.r_x[ra], mesh.r_x[rb]) - 1e-3;
+    const maxX = Math.max(mesh.t_x[tIn], mesh.t_x[tOut], mesh.r_x[ra], mesh.r_x[rb]) + 1e-3;
+    const minY = Math.min(mesh.t_y[tIn], mesh.t_y[tOut], mesh.r_y[ra], mesh.r_y[rb]) - 1e-3;
+    const maxY = Math.max(mesh.t_y[tIn], mesh.t_y[tOut], mesh.r_y[ra], mesh.r_y[rb]) + 1e-3;
+    let inBox = true;
     for (let i = 0; i < 5; i++) {
-      expect(a[2 * i]).toBeGreaterThanOrEqual(minX);
-      expect(a[2 * i]).toBeLessThanOrEqual(maxX);
-      expect(a[2 * i + 1]).toBeGreaterThanOrEqual(minY);
-      expect(a[2 * i + 1]).toBeLessThanOrEqual(maxY);
+      if (a[2 * i] < minX || a[2 * i] > maxX || a[2 * i + 1] < minY || a[2 * i + 1] > maxY) inBox = false;
     }
-    // The path is not the straight segment (displacement happened) for at least most sides;
-    // checked in aggregate below.
-    void cellSpacing;
+    check(inBox, `side ${s} path leaves its quad`);
   }
+  void cellSpacing;
+  expect(problems).toEqual([]);
 }
 
 function checkChains(mesh: Mesh, edges: NoisyEdges, cellSpacing: number): void {

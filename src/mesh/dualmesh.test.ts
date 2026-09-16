@@ -25,7 +25,7 @@ function shoelace(buf: Float32Array, n: number): number {
   return Math.abs(a) / 2;
 }
 
-/** Convex hull area of the point set (monotone chain), for the exact tiling identity. */
+/** Convex hull area of the point set (monotone chain); the cell areas sum to just under it. */
 function hullArea(mesh: Mesh): number {
   const idx: number[] = [];
   for (let r = 0; r < mesh.numRegions; r++) idx.push(r);
@@ -52,24 +52,32 @@ function hullArea(mesh: Mesh): number {
   return Math.abs(a) / 2;
 }
 
+/**
+ * The section 3.1 invariants, checked with plain counters and a single expect at the end: on the
+ * default mesh there are ~60k sides, and one vitest `expect` per element would take ~20 s.
+ */
 function meshInvariants(mesh: Mesh, params: WorldParams): void {
+  const problems: string[] = [];
+  const check = (ok: boolean, what: string): void => {
+    if (!ok && problems.length < 20) problems.push(what);
+  };
   const out: number[] = [];
 
-  // Twin of twin is self for every non-hull side; hull twins are -1.
+  // Twin of twin is self for every non-hull side; hull twins are -1. A side and its twin connect
+  // the same two regions in opposite directions.
   for (let s = 0; s < mesh.numSides; s++) {
     const o = mesh.s_opposite_s[s];
     if (o >= 0) {
-      expect(mesh.s_opposite_s[o]).toBe(s);
-      // A side and its twin connect the same two regions in opposite directions.
-      expect(mesh.s_start_r[o]).toBe(s_end_r(mesh, s));
-      expect(s_end_r(mesh, o)).toBe(mesh.s_start_r[s]);
+      check(mesh.s_opposite_s[o] === s, `twin of twin of side ${s} is ${mesh.s_opposite_s[o]}`);
+      check(mesh.s_start_r[o] === s_end_r(mesh, s), `twin of side ${s} does not start at its end`);
+      check(s_end_r(mesh, o) === mesh.s_start_r[s], `twin of side ${s} does not end at its start`);
     }
   }
 
   // Every region has a first side that starts at it.
   for (let r = 0; r < mesh.numRegions; r++) {
-    expect(mesh.r_first_s[r]).toBeGreaterThanOrEqual(0);
-    expect(mesh.s_start_r[mesh.r_first_s[r]]).toBe(r);
+    check(mesh.r_first_s[r] >= 0, `region ${r} has no first side`);
+    check(mesh.s_start_r[mesh.r_first_s[r]] === r, `first side of region ${r} starts elsewhere`);
   }
 
   // Interior regions: circulation closes with 3..12 sides, all starting at r, none on the hull.
@@ -77,47 +85,46 @@ function meshInvariants(mesh: Mesh, params: WorldParams): void {
   for (let s = 0; s < mesh.numSides; s++) degree[mesh.s_start_r[s]]++;
   for (let r = mesh.numBoundaryRegions; r < mesh.numRegions; r++) {
     r_circulate_s(mesh, r, out);
-    expect(out.length).toBeGreaterThanOrEqual(3);
-    expect(out.length).toBeLessThanOrEqual(12);
-    expect(out.length).toBe(degree[r]);
+    check(out.length >= 3 && out.length <= 12, `interior region ${r} circulates ${out.length} sides`);
+    check(out.length === degree[r], `interior region ${r} circulation misses sides`);
     for (const s of out) {
-      expect(mesh.s_start_r[s]).toBe(r);
-      expect(mesh.s_opposite_s[s]).toBeGreaterThanOrEqual(0);
+      check(mesh.s_start_r[s] === r, `side ${s} in circulation of ${r} starts elsewhere`);
+      check(mesh.s_opposite_s[s] >= 0, `interior region ${r} touches the hull via side ${s}`);
     }
-    expect(new Set(out).size).toBe(out.length);
+    check(new Set(out).size === out.length, `interior region ${r} circulation repeats a side`);
   }
 
   // Boundary regions: circulation (which stops at the hull) still visits every outgoing side.
   for (let r = 0; r < mesh.numBoundaryRegions; r++) {
     r_circulate_s(mesh, r, out);
-    expect(out.length).toBe(degree[r]);
-    expect(new Set(out).size).toBe(out.length);
+    check(out.length === degree[r], `boundary region ${r} circulates ${out.length} of ${degree[r]} sides`);
+    check(new Set(out).size === out.length, `boundary region ${r} circulation repeats a side`);
   }
 
   // Every triangle has 3 distinct regions and 3 sides leaving it.
   for (let t = 0; t < mesh.numTriangles; t++) {
     t_circulate_r(mesh, t, out);
-    expect(out.length).toBe(3);
-    expect(new Set(out).size).toBe(3);
+    check(out.length === 3 && new Set(out).size === 3, `triangle ${t} lacks 3 distinct regions`);
     t_circulate_s(mesh, t, out);
-    expect(out).toEqual([3 * t, 3 * t + 1, 3 * t + 2]);
-    for (let i = 0; i < 3; i++) expect(s_inner_t(3 * t + i)).toBe(t);
+    check(out[0] === 3 * t && out[1] === 3 * t + 1 && out[2] === 3 * t + 2, `triangle ${t} sides`);
+    for (let i = 0; i < 3; i++) check(s_inner_t(3 * t + i) === t, `s_inner_t of side ${3 * t + i}`);
     t_circulate_t(mesh, t, out);
-    expect(out.length).toBeLessThanOrEqual(3);
+    check(out.length <= 3, `triangle ${t} has ${out.length} neighbors`);
   }
 
-  // Every interior side's inner and outer corners differ.
+  // Every interior side's inner and outer corners differ, and the outer corner is the twin's inner.
   for (let s = 0; s < mesh.numSides; s++) {
     if (mesh.s_opposite_s[s] < 0) continue;
-    expect(s_outer_t(mesh, s)).not.toBe(s_inner_t(s));
-    expect(s_outer_t(mesh, s)).toBe(s_inner_t(mesh.s_opposite_s[s]));
+    check(s_outer_t(mesh, s) !== s_inner_t(s), `side ${s} has inner === outer corner`);
+    check(s_outer_t(mesh, s) === s_inner_t(mesh.s_opposite_s[s]), `side ${s} outer corner is not the twin's inner`);
   }
 
   // Corner positions are the triangle centroids.
   for (let t = 0; t < mesh.numTriangles; t++) {
     const a = mesh.triangles[3 * t], b = mesh.triangles[3 * t + 1], c = mesh.triangles[3 * t + 2];
-    expect(mesh.t_x[t]).toBeCloseTo((mesh.r_x[a] + mesh.r_x[b] + mesh.r_x[c]) / 3, 3);
-    expect(mesh.t_y[t]).toBeCloseTo((mesh.r_y[a] + mesh.r_y[b] + mesh.r_y[c]) / 3, 3);
+    const cx = (mesh.r_x[a] + mesh.r_x[b] + mesh.r_x[c]) / 3;
+    const cy = (mesh.r_y[a] + mesh.r_y[b] + mesh.r_y[c]) / 3;
+    check(Math.abs(mesh.t_x[t] - cx) < 1e-3 && Math.abs(mesh.t_y[t] - cy) < 1e-3, `corner ${t} is not the centroid`);
   }
 
   // r_circulate_r / r_circulate_t agree with r_circulate_s.
@@ -127,41 +134,45 @@ function meshInvariants(mesh: Mesh, params: WorldParams): void {
     r_circulate_s(mesh, r, out);
     r_circulate_r(mesh, r, nb);
     r_circulate_t(mesh, r, tc);
-    expect(nb.length).toBe(out.length);
-    expect(tc.length).toBe(out.length);
+    check(nb.length === out.length && tc.length === out.length, `region ${r} circulations disagree in length`);
     for (let i = 0; i < out.length; i++) {
-      expect(nb[i]).toBe(s_end_r(mesh, out[i]));
-      expect(tc[i]).toBe(s_inner_t(out[i]));
-      expect(nb[i]).not.toBe(r);
+      check(nb[i] === s_end_r(mesh, out[i]), `region ${r} neighbor ${i} is not the side's end`);
+      check(tc[i] === s_inner_t(out[i]), `region ${r} corner ${i} is not the side's inner corner`);
+      check(nb[i] !== r, `region ${r} is its own neighbor`);
     }
-    expect(new Set(nb).size).toBe(nb.length);
-    expect(new Set(tc).size).toBe(tc.length);
+    check(new Set(nb).size === nb.length, `region ${r} repeats a neighbor`);
+    check(new Set(tc).size === tc.length, `region ${r} repeats a corner`);
   }
 
-  // Cell areas: the centroid-dual cells tile the convex hull exactly, so the sum over ALL regions
-  // equals the hull area. The sum over interior regions is slightly OVER W*H because interior cells
-  // adjacent to the ring extend ~r/2..r beyond the rectangle edge.
+  // Cell polygons. Interior cells are closed polygons of >= 3 corners whose areas sum to slightly
+  // OVER W*H (cells next to the ring extend ~r/2..r beyond the rectangle edge). Boundary cells are
+  // truncated fans (the four ring corners have a single incident triangle, so a single corner),
+  // and the centroid dual does not tile the convex hull exactly: every hull triangle loses the
+  // third of its area that lies between its hull edge and the centroid, so the total is strictly
+  // under the hull area but not by much on a fine mesh.
   const buf = new Float32Array(64);
   let total = 0;
   let interior = 0;
   for (let r = 0; r < mesh.numRegions; r++) {
     const n = cellPolygon(mesh, r, buf);
-    expect(n).toBeGreaterThanOrEqual(2);
+    check(n >= 1, `region ${r} has an empty polygon`);
     const a = shoelace(buf, n);
     total += a;
     if (!r_is_boundary(mesh, r)) {
-      expect(n).toBeGreaterThanOrEqual(3);
+      check(n >= 3, `interior region ${r} polygon has ${n} corners`);
       interior += a;
     }
   }
   const hull = hullArea(mesh);
-  expect(Math.abs(total - hull) / hull).toBeLessThan(1e-3);
+  check(total < hull, `cell areas (${total}) exceed the hull (${hull})`);
+  check(total > 0.7 * hull, `cell areas (${total}) are far below the hull (${hull})`);
   const wh = params.width * params.height;
-  // Tolerance measured: default mesh ~ +2..3 %; the 300-point mesh (r = 40 on 400x300) up to ~ +40 %.
   const margin = params.cellSpacing;
   const upper = (params.width + 2 * margin) * (params.height + 2 * margin);
-  expect(interior).toBeGreaterThan(wh * 0.97);
-  expect(interior).toBeLessThan(upper);
+  check(interior > wh * 0.97, `interior area ${interior} is below 0.97 W*H`);
+  check(interior < upper, `interior area ${interior} exceeds (W+2r)(H+2r)`);
+
+  expect(problems).toEqual([]);
 }
 
 describe('dualmesh accessors', () => {

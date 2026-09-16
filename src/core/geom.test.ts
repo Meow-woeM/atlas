@@ -56,7 +56,8 @@ describe('chaikin', () => {
       expect(out[i + 1]).toBeLessThanOrEqual(10);
     }
     expect(polylineLength(out, true)).toBeLessThan(40);
-    expect(polylineLength(out, true)).toBeGreaterThan(35);
+    // Chaikin converges to the uniform quadratic B-spline of the square, whose perimeter is 32.46.
+    expect(polylineLength(out, true)).toBeGreaterThan(32);
   });
 });
 
