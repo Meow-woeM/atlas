@@ -67,6 +67,8 @@ import type { Rng } from '../core/rng';
 import { fork } from '../core/rng';
 import { r_circulate_r, s_inner_t, s_outer_t, t_circulate_r } from '../mesh/dualmesh';
 import { makeLanguage, makeWord } from './language';
+import type { Edits } from './edits';
+import { parseId } from '../core/ids';
 
 const DEMONYM_SUFFIXES: readonly string[] = ['ish', 'ian', 'i', 'ese', 'ar'];
 const DEMONYM_P = 0.3;
@@ -342,5 +344,30 @@ export function worldTitle(world: World): string {
     case 1: return 'The Realms of ' + x;
     case 2: return 'Lands of ' + x;
     default: return x + ' and the ' + rng.pick(ys) + ' Shores';
+  }
+}
+
+/** Applies valid stable-id name replacements; generated names remain untouched otherwise. */
+export function applyNameEdits(world: World, edits: Edits): void {
+  const entities = {
+    settlement: world.settlements,
+    province: world.provinces,
+    nation: world.politics.nations,
+    culture: world.politics.cultures,
+    river: world.features.rivers,
+    lake: world.features.lakes,
+    sea: world.features.seas,
+    range: world.features.ranges,
+  } as const;
+  for (const [rawId, replacement] of Object.entries(edits.names)) {
+    try {
+      const { kind, index } = parseId(rawId as `${keyof typeof entities}:${number}`);
+      if (!(kind in entities)) continue;
+      const list = entities[kind as keyof typeof entities];
+      if (index < 0 || index >= list.length) continue;
+      list[index].name = replacement;
+    } catch {
+      // Persistence is user-controlled; malformed ids are deliberately ignored.
+    }
   }
 }
