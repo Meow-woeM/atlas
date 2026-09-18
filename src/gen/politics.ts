@@ -62,13 +62,14 @@
 import type { Rng } from '../core/rng';
 import type {
   Biome, Culture, Geography, Language, Mesh, MorphemeKind, Nation, Politics, Province, ProvinceGraph,
-  Settlement, WorldEvent, WorldParams,
+  Settlement, World, WorldEvent, WorldParams,
 } from '../core/types';
 import { BIOMES } from '../core/types';
 import { MinHeap } from '../core/heap';
 import { mkId } from '../core/ids';
 import { r_circulate_r } from '../mesh/dualmesh';
 import { scoreCell } from './settlements';
+import type { Edits } from './edits';
 
 /** Twelve muted, parchment-friendly, mutually distinguishable nation tints. */
 export const NATION_COLORS: readonly string[] = [
@@ -389,5 +390,24 @@ export function derivePolitics(politics: Politics, r_province: Int16Array): void
   for (let r = 0; r < nr; r++) {
     const p = r_province[r];
     r_nation[r] = p < 0 || p >= numP ? -1 : p_nation[p];
+  }
+}
+
+/** Applies valid province ownership, re-derives cells, then applies valid fine-brush cells. */
+export function applyPoliticalEdits(world: World, edits: Edits): void {
+  const { politics, r_province } = world;
+  const numNations = politics.nations.length;
+  for (const [key, nation] of Object.entries(edits.p_nation)) {
+    const p = Number(key);
+    if (!Number.isInteger(p) || p < 0 || p >= politics.p_nation.length) continue;
+    if (!Number.isInteger(nation) || nation < -1 || nation >= numNations) continue;
+    politics.p_nation[p] = nation;
+  }
+  derivePolitics(politics, r_province);
+  for (const [key, nation] of Object.entries(edits.r_nation)) {
+    const r = Number(key);
+    if (!Number.isInteger(r) || r < 0 || r >= politics.r_nation.length) continue;
+    if (!Number.isInteger(nation) || nation < -1 || nation >= numNations) continue;
+    politics.r_nation[r] = nation;
   }
 }

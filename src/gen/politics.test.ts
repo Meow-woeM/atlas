@@ -11,7 +11,7 @@ import { describe, it, expect } from 'vitest';
 import { fork } from '../core/rng';
 import { DEFAULT_PARAMS } from '../core/types';
 import type {
-  Geography, Mesh, NoisyEdges, Politics, Province, ProvinceGraph, Settlement, WorldEvent, WorldParams,
+  Geography, Mesh, NoisyEdges, Politics, Province, ProvinceGraph, Settlement, World, WorldEvent, WorldParams,
 } from '../core/types';
 import { parseId } from '../core/ids';
 import { generatePoints } from '../mesh/poisson';
@@ -23,7 +23,8 @@ import { computeClimate, computeBiomes } from './climate';
 import { computeHydrology } from './hydrology';
 import { computeProvinces } from './provinces';
 import { placeSettlements, scoreCell } from './settlements';
-import { derivePolitics, foundNations, NATION_COLORS } from './politics';
+import { applyPoliticalEdits, derivePolitics, foundNations, NATION_COLORS } from './politics';
+import type { Edits } from './edits';
 
 const SEED = 'atlas-11';
 const SMALL: WorldParams = {
@@ -156,6 +157,25 @@ const worlds: Built[] = [
   build('default', DEFAULT_PARAMS, SEED),
   build('small', SMALL, SEED),
 ];
+
+describe('political edits', () => {
+  it('applies provinces before cells so the fine brush wins', () => {
+    const politics = {
+      year: 0, cultures: [],
+      nations: [
+        { id: 0, name: 'A', capital: -1, culture: -1, color: '#000000', founded: 0, died: -1 },
+        { id: 1, name: 'B', capital: -1, culture: -1, color: '#ffffff', founded: 0, died: -1 },
+      ],
+      p_nation: new Int16Array([0, 0]), p_culture: new Int16Array(2),
+      r_nation: new Int16Array(3), r_settlement: new Int16Array(3).fill(-1),
+    };
+    const world = { politics, r_province: new Int16Array([0, 0, 1]) } as unknown as World;
+    const edits: Edits = { names: {}, p_nation: { '0': 1, '8': 0 }, r_nation: { '1': 0, '9': 1 } };
+    applyPoliticalEdits(world, edits);
+    expect(Array.from(politics.p_nation)).toEqual([1, 0]);
+    expect(Array.from(politics.r_nation)).toEqual([1, 0, 0]);
+  });
+});
 
 describe('NATION_COLORS', () => {
   it('has at least 12 distinct css colors', () => {
