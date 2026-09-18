@@ -73,7 +73,7 @@ function buildGeography(params: WorldParams, seed: string): { mesh: Mesh; edges:
     r_slope: elev.r_slope,
     t_elevation: hydro.t_elevation, t_downslope_s: hydro.t_downslope_s, t_flux: hydro.t_flux,
     t_lake: hydro.t_lake, s_river: hydro.s_river, s_riverId: hydro.s_riverId,
-    windDir: climate.windDir, distField,
+    windDir: climate.windDir, distField, formation: elev.formation,
   };
   return { mesh, edges, geo };
 }

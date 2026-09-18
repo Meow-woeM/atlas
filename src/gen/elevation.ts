@@ -62,24 +62,14 @@
  */
 
 import type { Rng } from '../core/rng';
-import type { Mesh, Raster, WorldParams } from '../core/types';
+import type { Formation, Mesh, Raster, WorldParams } from '../core/types';
+export type { Formation };
 import { FORMATION_STEPS } from '../core/types';
 import type { Tectonics } from './tectonics';
 import { makeSimplex3, fbm3 } from '../core/noise';
 import { quantile } from '../core/geom';
 import { makeRaster, rasterizeCells, edt, sampleBilinear } from '../core/raster';
 import { cellLatLon, cellUnitVector, cellCentroids, r_circulate_r } from '../mesh/dualmesh';
-
-/** The time-independent parts of raw height, plus the absolute sea level every step is read against.
- *  Plain typed arrays: structured-cloneable, and cheap enough to re-evaluate on every scroll tick. */
-export interface Formation {
-  steps: number;
-  r_noise: Float32Array;     // basement fBm, min-max normalised to 0..1 over interior cells
-  r_craton: Float32Array;    // continental basement 0..1 (from Tectonics)
-  r_uplift: Float32Array;    // tectonic uplift, + convergent / - rift, shaped by craton
-  r_falloff: Float32Array;   // edge falloff, 0 at the rectangle's margin up to 1 inland
-  seaLevel: number;          // absolute: the landFraction quantile of raw at the LAST step
-}
 
 export interface ElevationResult {
   r_elevation: Float32Array; r_water: Uint8Array; r_coastHops: Int16Array; r_slope: Float32Array;

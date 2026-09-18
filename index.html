@@ -71,6 +71,12 @@
     <main id="stage">
       <canvas id="map" width="1024" height="768" aria-label="Generated map"></canvas>
       <div id="overlay" hidden><span>Rendering&hellip;</span></div>
+      <div id="formation">
+        <label for="formation-step">Formation</label>
+        <input id="formation-step" type="range" min="0" max="23" step="1" value="23"
+               aria-label="How far the land has formed" />
+        <button type="button" id="formation-now" title="Back to the present day">Present</button>
+      </div>
     </main>
 
     <script type="module" src="/src/main.ts"></script>

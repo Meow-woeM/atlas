@@ -8,10 +8,11 @@
  */
 import './style.css';
 import type { LayerToggles, PoliticalView, WindDir, World, WorldParams } from './core/types';
-import { DEFAULT_PARAMS } from './core/types';
+import { DEFAULT_PARAMS, FORMATION_STEPS } from './core/types';
 import { generate } from './gen/world';
+import { landMaskAtStep } from './gen/elevation';
 import { buildPoliticalView } from './gen/features';
-import { renderWorld, DEFAULT_LAYERS } from './render/painter';
+import { renderWorld, renderFormationPreview, DEFAULT_LAYERS } from './render/painter';
 import { exportPng, downloadBlob } from './render/export';
 
 // ---------------------------------------------------------------- constants
@@ -45,6 +46,8 @@ const controlsForm = byId<HTMLFormElement>('controls');
 const stage = byId<HTMLElement>('stage');
 const canvas = byId<HTMLCanvasElement>('map');
 const overlay = byId<HTMLElement>('overlay');
+const formationRange = byId<HTMLInputElement>('formation-step');
+const formationNow = byId<HTMLButtonElement>('formation-now');
 const layerBoxes = {} as Record<keyof LayerToggles, HTMLInputElement>;
 for (const key of LAYER_KEYS) layerBoxes[key] = byId<HTMLInputElement>('layer-' + key);
 
@@ -60,6 +63,9 @@ let exportMs = 0;
 let exportBusy = false;
 let lastCanvasW = 0;
 let lastCanvasH = 0;
+/** Set while the formation bar is being dragged: the canvas is showing a silhouette, not a world. */
+let scrubbing = false;
+let scrubTimer = 0;
 
 // ---------------------------------------------------------------- seed and hash
 
@@ -98,6 +104,8 @@ function readHash(): { seed: string | null; params: WorldParams } {
   if (wind !== undefined) next.windDir = wind;
   const cells = parseNumber(q.get('cells'), 4, 32);
   if (cells !== undefined) next.cellSpacing = cells;
+  const step = parseNumber(q.get('step'), 0, FORMATION_STEPS - 1);
+  if (step !== undefined) next.formationStep = Math.round(step);
   return { seed: seed !== null && seed.trim() !== '' ? seed.trim() : null, params: next };
 }
 
@@ -107,6 +115,7 @@ function writeHash(seed: string, p: WorldParams): void {
   if (p.landFraction !== DEFAULT_PARAMS.landFraction) q.set('land', String(p.landFraction));
   if (p.windDir !== DEFAULT_PARAMS.windDir) q.set('wind', String(p.windDir));
   if (p.cellSpacing !== DEFAULT_PARAMS.cellSpacing) q.set('cells', String(p.cellSpacing));
+  if (p.formationStep !== DEFAULT_PARAMS.formationStep) q.set('step', String(p.formationStep));
   const next = '#' + q.toString();
   if (location.hash !== next) history.replaceState(null, '', next);
 }
@@ -208,6 +217,12 @@ function fitCanvas(): number {
 
 function render(): void {
   if (!world || !view) return;
+  // Mid-drag the canvas is showing a formation silhouette; a resize must not repaint the present
+  // day over it, or the map would flicker back and forth while the bar is moving.
+  if (scrubbing) {
+    previewFormation(Math.round(Number(formationRange.value)));
+    return;
+  }
   try {
     const scale = fitCanvas();
     const ctx = canvas.getContext('2d');
@@ -221,6 +236,64 @@ function render(): void {
   } catch (err) {
     showError('render', err);
   }
+}
+
+// ---------------------------------------------------------------- formation scroll bar
+
+/**
+ * The bar has no dates on it: it is a position in the land's formation, from the earliest step to
+ * the present day. Dragging it would be unusable if every tick regenerated the world (~200 ms a
+ * frame), so a drag paints only the land/sea silhouette at that step, which costs one pass over
+ * the cells, and the full pipeline runs once the drag settles.
+ *
+ * The silhouette comes from landMaskAtStep in gen/elevation.ts. Reusing the CURRENT world's
+ * formation is exactly right: the plates and the three height fields do not depend on the step, so
+ * scrubbing never needs the earlier stages re-run — only the ramps change.
+ */
+const SCRUB_SETTLE_MS = 180;
+
+function previewFormation(step: number): void {
+  if (!world) return;
+  try {
+    const scale = fitCanvas();
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const mask = landMaskAtStep(world.mesh, world.geo.formation, step);
+    renderFormationPreview(world.mesh, mask, ctx, {
+      scale, width: params.width, height: params.height,
+    });
+    lastCanvasW = canvas.width;
+    lastCanvasH = canvas.height;
+  } catch (err) {
+    showError('formation preview', err);
+  }
+}
+
+function commitFormation(step: number): void {
+  scrubbing = false;
+  if (params.formationStep === step && world) {
+    render();
+    return;
+  }
+  params.formationStep = step;
+  doGenerate();
+}
+
+function onFormationInput(): void {
+  const step = Math.round(Number(formationRange.value));
+  scrubbing = true;
+  previewFormation(step);
+  if (scrubTimer !== 0) clearTimeout(scrubTimer);
+  scrubTimer = setTimeout(() => {
+    scrubTimer = 0;
+    commitFormation(Math.round(Number(formationRange.value)));
+  }, SCRUB_SETTLE_MS) as unknown as number;
+}
+
+function syncFormationControl(): void {
+  formationRange.max = String(FORMATION_STEPS - 1);
+  formationRange.value = String(params.formationStep);
+  formationNow.disabled = params.formationStep === FORMATION_STEPS - 1;
 }
 
 // ---------------------------------------------------------------- generate
@@ -240,6 +313,7 @@ function doGenerate(): void {
     generateMs = performance.now() - t0;
     exportMs = 0;
     document.title = 'Atlas — ' + seed;
+    syncFormationControl();
   } catch (err) {
     world = null;
     view = null;
@@ -287,6 +361,20 @@ async function doExport(): Promise<void> {
 controlsForm.addEventListener('submit', (ev) => {
   ev.preventDefault();
   doGenerate();
+});
+
+formationRange.addEventListener('input', onFormationInput);
+// A keyboard user gets 'change' on arrow keys too, but 'input' already fired and armed the timer;
+// committing here just skips the settle delay when the drag ends.
+formationRange.addEventListener('change', () => {
+  if (scrubTimer !== 0) { clearTimeout(scrubTimer); scrubTimer = 0; }
+  commitFormation(Math.round(Number(formationRange.value)));
+});
+
+formationNow.addEventListener('click', () => {
+  formationRange.value = String(FORMATION_STEPS - 1);
+  if (scrubTimer !== 0) { clearTimeout(scrubTimer); scrubTimer = 0; }
+  commitFormation(FORMATION_STEPS - 1);
 });
 
 randomizeBtn.addEventListener('click', () => {

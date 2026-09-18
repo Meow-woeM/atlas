@@ -82,6 +82,21 @@ export type BiomeIndex = number;
 
 export interface Raster { w: number; h: number; scale: number; data: Float32Array; }
 
+/**
+ * The time-independent parts of raw height, plus the absolute sea level every step is read against.
+ * gen/elevation.ts builds it and rawAtStep / landMaskAtStep evaluate a moment from it, so the
+ * formation timeline never stores a snapshot per step. Plain typed arrays: structured-cloneable,
+ * and cheap enough to re-evaluate on every tick of the scroll bar.
+ */
+export interface Formation {
+  steps: number;
+  r_noise: Float32Array;     // basement fBm, min-max normalised to 0..1 over interior cells
+  r_craton: Float32Array;    // continental basement 0..1 (from Tectonics)
+  r_uplift: Float32Array;    // tectonic uplift, + convergent / - rift, shaped by craton
+  r_falloff: Float32Array;   // edge falloff, 0 at the rectangle's margin up to 1 inland
+  seaLevel: number;          // absolute: the landFraction quantile of raw at the LAST step
+}
+
 export interface Geography {
   // per cell r, length mesh.numRegions
   r_elevation: Float32Array;   // -1..1, 0 = sea level, water < 0
@@ -104,6 +119,7 @@ export interface Geography {
   s_riverId: Int16Array;       // river index or -1
   windDir: WindDir;            // the resolved prevailing wind
   distField: Raster;           // signed EDT of the land mask at params.rasterScale
+  formation: Formation;        // lets any step of the land-formation timeline be re-evaluated
 }
 
 // ---------------------------------------------------------------- features (derived vector geometry)
