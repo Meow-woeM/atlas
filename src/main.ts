@@ -13,6 +13,10 @@ import { generate } from './gen/world';
 import { buildPoliticalView } from './gen/features';
 import { renderWorld, DEFAULT_LAYERS } from './render/painter';
 import { exportPng, downloadBlob } from './render/export';
+import type { Edits } from './gen/edits';
+import { applyEdits, emptyEdits } from './gen/edits';
+import { assignNames } from './gen/names';
+import { initEditor } from './ui/editor';
 
 // ---------------------------------------------------------------- constants
 
@@ -60,6 +64,7 @@ let exportMs = 0;
 let exportBusy = false;
 let lastCanvasW = 0;
 let lastCanvasH = 0;
+const edits: Edits = emptyEdits();
 
 // ---------------------------------------------------------------- seed and hash
 
@@ -240,6 +245,7 @@ function doGenerate(): void {
     generateMs = performance.now() - t0;
     exportMs = 0;
     document.title = 'Atlas — ' + seed;
+    window.dispatchEvent(new Event('atlas-world-changed'));
   } catch (err) {
     world = null;
     view = null;
@@ -323,6 +329,25 @@ const ro = new ResizeObserver(() => {
   });
 });
 ro.observe(stage);
+
+initEditor({
+  getWorld: () => world,
+  getEdits: () => edits,
+  onEditsChanged: () => {
+    if (!world) return;
+    assignNames(world);
+    applyEdits(world, edits);
+    view = buildPoliticalView(world);
+    render();
+  },
+  canvasToLogical: (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (ev.clientX - rect.left) * params.width / rect.width,
+      y: (ev.clientY - rect.top) * params.height / rect.height,
+    };
+  },
+});
 
 // ---------------------------------------------------------------- boot
 
