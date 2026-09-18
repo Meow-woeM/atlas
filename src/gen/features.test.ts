@@ -16,6 +16,7 @@ import { generatePoints } from '../mesh/poisson';
 import { buildMesh, cellPolygon, r_circulate_r, r_is_boundary, s_inner_t, s_outer_t } from '../mesh/dualmesh';
 import { buildNoisyEdges } from '../mesh/noisy';
 import { computeElevation, computeDistanceField } from './elevation';
+import { computeTectonics } from './tectonics';
 import { computeBiomes, computeClimate } from './climate';
 import { computeHydrology } from './hydrology';
 import type { HydrologyResult } from './hydrology';
@@ -45,7 +46,7 @@ function build(label: string, params: WorldParams, seed: string): Built {
   const { points, numBoundary } = generatePoints(params, fork(seed, 'points'));
   const mesh = buildMesh(points, numBoundary);
   const edges = buildNoisyEdges(mesh, fork(seed, 'edges'));
-  const elev = computeElevation(mesh, params, fork(seed, 'elevation'));
+  const elev = computeElevation(mesh, params, fork(seed, 'elevation'), computeTectonics(mesh, params, fork(seed, 'tectonics')));
   const { distField, r_coastDist } = computeDistanceField(mesh, params, elev.r_water);
   const climate = computeClimate(
     mesh, params,
@@ -63,7 +64,7 @@ function build(label: string, params: WorldParams, seed: string): Built {
     r_moisture: climate.r_moisture, r_biome, r_slope: elev.r_slope,
     t_elevation: hydro.t_elevation, t_downslope_s: hydro.t_downslope_s, t_flux: hydro.t_flux,
     t_lake: hydro.t_lake, s_river: hydro.s_river, s_riverId: hydro.s_riverId,
-    windDir: climate.windDir, distField,
+    windDir: climate.windDir, distField, formation: elev.formation,
   };
   const t0 = performance.now();
   const features = extractFeatures({ mesh, edges, geo, params }, hydro);

@@ -16,13 +16,14 @@ import type { WorldParams } from '../core/types';
 import { generatePoints } from '../mesh/poisson';
 import { buildMesh, r_circulate_r } from '../mesh/dualmesh';
 import { computeElevation, computeDistanceField } from './elevation';
+import { computeTectonics } from './tectonics';
 import { computeClimate } from './climate';
 import { computeHydrology } from './hydrology';
 import { fromWorldFile, generate, toWorldFile, withParams } from './world';
 
 const SEED = 'test-1';
 const STAGE_KEYS = [
-  'points', 'mesh', 'edges', 'elevation', 'distance', 'climate', 'hydrology', 'biomes',
+  'points', 'mesh', 'edges', 'tectonics', 'elevation', 'distance', 'climate', 'hydrology', 'biomes',
   'features', 'provinces', 'settlements', 'politics', 'names', 'history',
 ] as const;
 
@@ -154,7 +155,7 @@ describe('generate: determinism', () => {
 });
 
 describe('generate: timings', () => {
-  it('records all 14 stage keys as finite non-negative numbers, in execution order', () => {
+  it('records all 15 stage keys as finite non-negative numbers, in execution order', () => {
     const keys = Object.keys(worldA.timings);
     expect(keys).toEqual([...STAGE_KEYS]);
     let bad = 0;
@@ -308,7 +309,7 @@ describe('geography assembly', () => {
   const params = withParams({});
   const { points, numBoundary } = generatePoints(params, fork(SEED, 'points'));
   const mesh = buildMesh(points, numBoundary);
-  const elev = computeElevation(mesh, params, fork(SEED, 'elevation'));
+  const elev = computeElevation(mesh, params, fork(SEED, 'elevation'), computeTectonics(mesh, params, fork(SEED, 'tectonics')));
   const { r_coastDist } = computeDistanceField(mesh, params, elev.r_water);
   const climate = computeClimate(
     mesh, params,

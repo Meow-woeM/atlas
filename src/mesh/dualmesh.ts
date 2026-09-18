@@ -191,6 +191,32 @@ export function cellPolygon(mesh: Mesh, r: number, out: Float32Array): number {
   return n;
 }
 
+/**
+ * Cell positions as the average of each cellPolygon's corners. This is the sanctioned way to get a
+ * cell's position for generation (mesh.r_x / r_y are the Delaunay input points, which sit off-centre
+ * in a cell whose polygon is one-sided). Fills `out` when given, allocates otherwise.
+ */
+export function cellCentroids(
+  mesh: Mesh, out?: { r_px: Float32Array; r_py: Float32Array },
+): { r_px: Float32Array; r_py: Float32Array } {
+  const n = mesh.numRegions;
+  const r_px = out ? out.r_px : new Float32Array(n);
+  const r_py = out ? out.r_py : new Float32Array(n);
+  const poly = new Float32Array(64);
+  for (let r = 0; r < n; r++) {
+    const k = cellPolygon(mesh, r, poly);
+    if (k === 0) { r_px[r] = 0; r_py[r] = 0; continue; }
+    let sx = 0, sy = 0;
+    for (let i = 0; i < k; i++) {
+      sx += poly[2 * i];
+      sy += poly[2 * i + 1];
+    }
+    r_px[r] = sx / k;
+    r_py[r] = sy / k;
+  }
+  return { r_px, r_py };
+}
+
 /** Linear map of the cell center into params.frame; lat0 is at y = 0 (top), lon0 at x = 0. */
 export function cellLatLon(mesh: Mesh, params: WorldParams, r: number): [lat: number, lon: number] {
   const f = params.frame;

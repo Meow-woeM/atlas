@@ -15,6 +15,7 @@ import {
   buildMesh, r_circulate_r, r_circulate_t, t_circulate_r, t_circulate_t, s_inner_t, s_outer_t,
 } from '../mesh/dualmesh';
 import { computeElevation, computeDistanceField } from './elevation';
+import { computeTectonics } from './tectonics';
 import { computeClimate } from './climate';
 import { computeHydrology } from './hydrology';
 import type { HydrologyResult } from './hydrology';
@@ -40,7 +41,7 @@ interface Built {
 function build(label: string, params: WorldParams, seed: string): Built {
   const { points, numBoundary } = generatePoints(params, fork(seed, 'points'));
   const mesh = buildMesh(points, numBoundary);
-  const elev = computeElevation(mesh, params, fork(seed, 'elevation'));
+  const elev = computeElevation(mesh, params, fork(seed, 'elevation'), computeTectonics(mesh, params, fork(seed, 'tectonics')));
   const { r_coastDist } = computeDistanceField(mesh, params, elev.r_water);
   const climate = computeClimate(
     mesh, params,
@@ -308,7 +309,7 @@ for (const w of worlds) {
       expect(negativeLand).toBe(0);
     });
 
-    it('rivers: >= 6 consecutive sides from a source, mirrored twins, ids consistent, flux monotone', () => {
+    it('rivers: >= 6 consecutive sides from a source unless fed, mirrored twins, ids consistent, flux monotone', () => {
       const { riverSides, riverParent, s_river, s_riverId, t_flux, t_downslope_s } = hydro;
       const n = riverSides.length;
       // Threshold and sources recomputed as the spec states them.
@@ -322,12 +323,16 @@ for (const w of worlds) {
         if (isLandCorner(w, t) && t_flux[t] >= threshold) hasUp[s_outer_t(mesh, t_downslope_s[t])] = 1;
       }
       const t_owner = new Int32Array(nt).fill(-1);
+      // A river under RIVER_MIN_SIDES survives only when another river names it as parent
+      // (the fixpoint in hydrology.ts step 6), so only childless short rivers are a defect.
+      const childCount = new Int32Array(n);
+      for (let i = 0; i < n; i++) if (riverParent[i] >= 0) childCount[riverParent[i]]++;
       let short = 0, broken = 0, notDownslope = 0, badId = 0, badTwin = 0, badFlux = 0, fluxDrop = 0;
       let notSource = 0, badMouth = 0, badParent = 0, cyclic = 0, ownerClash = 0;
       let listed = 0;
       for (let i = 0; i < n; i++) {
         const sides = riverSides[i];
-        if (sides.length < 6) short++;
+        if (sides.length < 6 && childCount[i] === 0) short++;
         listed += sides.length;
         for (let j = 0; j < sides.length; j++) {
           const s = sides[j];

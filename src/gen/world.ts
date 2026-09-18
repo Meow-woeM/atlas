@@ -64,6 +64,7 @@ import { fork } from '../core/rng';
 import { generatePoints } from '../mesh/poisson';
 import { buildMesh, r_circulate_r } from '../mesh/dualmesh';
 import { buildNoisyEdges } from '../mesh/noisy';
+import { computeTectonics } from './tectonics';
 import { computeElevation, computeDistanceField } from './elevation';
 import type { ElevationResult } from './elevation';
 import { computeClimate, computeBiomes } from './climate';
@@ -78,9 +79,9 @@ import { assignNames, worldTitle } from './names';
 /** Elevation given to a reverted lake candidate with no positive land neighbour; also the floor. */
 const REVERT_FLOOR = 0.005;
 
-/** The 14 timing keys generate records, in execution order. */
+/** The 15 timing keys generate records, in execution order. */
 const STAGE_NAMES = [
-  'points', 'mesh', 'edges', 'elevation', 'distance', 'climate', 'hydrology', 'biomes',
+  'points', 'mesh', 'edges', 'tectonics', 'elevation', 'distance', 'climate', 'hydrology', 'biomes',
   'features', 'provinces', 'settlements', 'politics', 'names', 'history',
 ] as const;
 
@@ -115,8 +116,10 @@ export function generate(seed: string, params?: Partial<WorldParams>): World {
   const edges = buildNoisyEdges(mesh, fork(seed, 'edges'));
   lap('edges');
 
-  // 4-6: elevation, distance field, climate
-  const elev = computeElevation(mesh, p, fork(seed, 'elevation'));
+  // 3.5-6: plates, elevation, distance field, climate
+  const tectonics = computeTectonics(mesh, p, fork(seed, 'tectonics'));
+  lap('tectonics');
+  const elev = computeElevation(mesh, p, fork(seed, 'elevation'), tectonics);
   lap('elevation');
   const { distField, r_coastDist } = computeDistanceField(mesh, p, elev.r_water);
   lap('distance');
@@ -227,7 +230,7 @@ function assembleGeography(
     r_temperature: climate.r_temperature, r_moisture: climate.r_moisture, r_slope,
     t_elevation: hydro.t_elevation, t_downslope_s: hydro.t_downslope_s, t_flux: hydro.t_flux,
     t_lake: hydro.t_lake, s_river: hydro.s_river, s_riverId: hydro.s_riverId,
-    windDir: climate.windDir, distField,
+    windDir: climate.windDir, distField, formation: elev.formation,
   };
 }
 
