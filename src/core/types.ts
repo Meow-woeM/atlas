@@ -26,7 +26,7 @@ export interface WorldParams {
   riverPercentile: number;    // 0.94
   provinceSpacing: number;    // Poisson radius for province sites in logical px (48 -> ~140 provinces)
   settlementsMax: number;     // 40
-  nationsMax: number;         // 8
+  nationsMax: number;         // 8. Caps the capital-seeded nations only; free cities are added on top.
 }
 
 export const DEFAULT_PARAMS: WorldParams = {

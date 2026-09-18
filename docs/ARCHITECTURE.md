@@ -457,10 +457,12 @@ Score every land cell: `2.0·fertility[biome] + 0.05·coast + 0.5·riverSide + 0
 ### Stage 11 — Cultures and nations
 
 - `K = clamp(round(n / 5), 3, nationsMax)` capitals = highest-scoring settlements re-chosen with a 150 px spacing, one per province at most.
-- One culture per capital (`cultures.length === K` on day one); `home_p` = capital's province; `p_culture` by Dijkstra over the province graph with cost `1 + hostility(biome) + 3·(mountain link)`, so culture edges follow mountains and deserts.
+- One culture per capital; `home_p` = capital's province; `p_culture` by Dijkstra over the province graph with cost `1 + hostility(biome) + 3·(mountain link)`, so culture edges follow mountains and deserts.
 - Nations: Dijkstra over the **province graph** from the K capitals, link cost `1 + 3·cultureMismatch + 2·(shared border < 20 px) + 4·(either province mean elev > 0.6)`, ocean impassable, capped at 12 hops; every province joins the nearest capital → `p_nation`. Provinces on islands unreachable from any capital become free cities (`p_nation` = a new nation whose capital is the island's best settlement) if they have a settlement, else unclaimed (`-1`).
 - `derivePolitics` fills `r_nation` from `p_nation` through `r_province`.
 - Emit events: `culture.emerged`, `nation.founded`, one `province.claimed` per province (`cause` = the nation's founding seq), `settlement.founded` for every settlement.
+
+**Corrected 2026-09-18 (review).** The doc used to say `cultures.length === K`. It is `cultures.length === nations.length`: every free city gets its own culture too, because names.ts needs a language per nation. For the same reason `nationsMax` caps only the **primary**, capital-seeded nations (`K = clamp(round(n / 5), 3, nationsMax)`, the `nationsMax` clamp applied last so it wins over the minimum of 3) — free cities are appended after it, so `nations.length` may exceed `nationsMax`. Measured at seed `probe`: `continents: 1` gives 9 nations and `continents: 3` gives 10 against the default `nationsMax` of 8. That is the intended behaviour (an island with a town is a polity), not a bug; it is the doc and the `nationsMax` comment that were wrong.
 
 Nothing in this stage writes to any geography object, and nothing outside `Politics` stores a nation index except `Settlement.culture` (a founding fact).
 
@@ -818,8 +820,9 @@ Tectonic plates; real wind/temperature simulation; roads and trade routes; the y
 - Every stage receives a forked `Rng`; never share one stream across stages, never draw from a parent stream after forking children from it.
 - Per-entity randomness (names, glyph jitter for a given cell) forks by stable id: `fork(seed, 'names', 'river:3')`, `fork(seed, 'ink', 'relief')`.
 - Sorts that affect output use typed-array index sorts with explicit numeric tie-breaks on the index (`(a, b) => key[a] - key[b] || a - b`); never rely on `Array.prototype.sort` stability for objects.
-- No `Math.sin`-based hashes; no `Date`, `performance.now()` only for `timings`.
+- No `Math.sin`-based hashes; no `Date`, `performance.now()` only for `timings`. All three rules are enforced by `src/no-math-random.test.ts`, which greps every non-test file under `src/`.
 - Changing what a stage draws from its stream, or the stage order, bumps `ATLAS_VERSION` and `params.version`.
+- **Caveat on "every machine" (found in the 2026-09-18 review).** `Math.sqrt` is correctly rounded by IEEE 754, but `Math.sin`, `Math.cos`, `Math.pow`, `Math.exp`, `Math.log`, `Math.atan2` and `Math.acos` are only *implementation-approximated* in ECMAScript, so a different engine may return a different last bit. Generation uses them in `mesh/poisson.ts` (candidate offsets), `mesh/dualmesh.ts` (lat/lon), `gen/elevation.ts`, `gen/climate.ts`, `core/geom.ts` and `core/rng.ts` (`gaussian`). In practice V8, SpiderMonkey and JavaScriptCore all ship fdlibm-derived versions and agree, which is why the same seed does reproduce across browsers today — but it is an engine convention, not a spec guarantee. Making it a guarantee means shipping our own `sin`/`cos`/`exp`/`log`, which is a `params.version` bump and is not worth it until someone reports a mismatch; the tests would catch it as a cross-machine digest difference, not as a local failure.
 
 **Data and memory**
 
