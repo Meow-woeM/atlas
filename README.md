@@ -2,6 +2,8 @@
 
 Atlas is a browser-native procedural fantasy world generator. Type a seed and, in a fraction of a second, you get a deterministic, hand-inked parchment map: coasts, mountains, rivers that always reach the sea, biomes, lakes, named settlements and nations, framed with a compass rose, scale bar and title cartouche. The same seed reproduces the same world on every machine, and the map exports as a print-crisp 1x, 2x or 4x PNG.
 
+The land is built by plate tectonics, so you can drag the scroll bar under the map and watch continents rise out of the ocean and mountain belts grow along the plate boundaries — then stop anywhere along that formation and keep the world you find. Names and national borders are editable in place.
+
 Under the hood the single source of truth is a ~10,000-cell Voronoi graph. Every terrain, water, political and historical quantity is a typed array indexed by cell, corner or side, and every line on the map is a chain of mesh sides, so it is a vector polyline the moment it exists. Rendering is Canvas 2D in logical pixels; screen, 2x and 4x export are the same function call at a different scale. There is no UI framework and one runtime dependency (`delaunator`).
 
 ## Running
@@ -19,17 +21,18 @@ npm run typecheck  # tsc --noEmit
 The seed and the generation parameters live in the URL hash, so a world is shareable as a link:
 
 ```
-#seed=<string>&land=<fraction>&wind=<0-7|random>&cells=<spacing>
+#seed=<string>&land=<fraction>&wind=<0-7|random>&cells=<spacing>&step=<0-23>
 ```
 
 - `seed` is any string; the Randomize button makes an 8-letter one. Omit it and the app picks one at random.
 - `land` is the land fraction (default `0.42`).
 - `wind` is the compass point the prevailing wind blows from: `0` W, `1` NW, `2` N, `3` NE, `4` E, `5` SE, `6` S, `7` SW, or `random` (default).
 - `cells` is the Poisson-disc spacing in logical px (default `8`; `6` is detailed, `12` is instant).
+- `step` is the moment on the land-formation timeline, `0` (earliest) to `23` (the present day, the default). Omitted from the hash at the present day.
 
 Example: `https://<host>/atlas/#seed=amberfell&land=0.45&wind=2&cells=8`
 
-## Status: day one complete (2026-09-17), sampler retuned (2026-09-18)
+## Status: day one complete (2026-09-17); sampler retuned, tectonics, formation timeline and the edit layer (2026-09-18)
 
 Every module in `docs/ARCHITECTURE.md` section 7 exists, the three gates are green (`npm test`: 379 tests in 21 files; `npm run typecheck`: zero errors; `npm run build`: tsc + vite, ~94 kB of JS) and the app runs in headless Chromium. Re-checked after the sampler retune on 2026-09-18: seeds `atlas`, `amberfell`, `test-1` and `zzzzzzzz` each generate and render a complete map (coast, relief, rivers, lakes, borders, settlements, labels, cartouche, compass, scale bar) with no console errors from the app, and the 2x PNG export works. Those numbers -- generate 184-333 ms wall, 1x screen render 78-122 ms, 2x export 527 ms -- came from a sandboxed Linux container, so they are slower than the 2026-09-17 laptop run (170-195 ms / 65-105 ms / ~440 ms) and are not comparable to it; the node measurements below are the ones to track. That sandbox cannot reach the webfont CDN, so the run also exercised the fallback-serif path rather than IM Fell English. The deployed site is https://meow-woem.github.io/atlas/ (GitHub Pages, built by `.github/workflows/pages.yml` on every push to `main`).
 
@@ -39,7 +42,10 @@ Every module in `docs/ARCHITECTURE.md` section 7 exists, the three gates are gre
 - `src/mesh/*`: Poisson-disc points with the boundary ring, the Delaunator dual mesh with its accessors and the four coordinate helpers, noisy edges and the generic side chainer. The section 3.1 invariants pass on a 300-point mesh and on the default mesh.
 - `src/gen/*`: every stage of section 5. `elevation` (4-5), `climate` (6, 8), `hydrology` (7), `provinces` (9), `settlements` (10), `politics` (11), `language` + `names` (12), `features` (13-14) and `world` (the orchestrator, timings, the year-0 history log, `toWorldFile` / `fromWorldFile`). Each stage has a test file that builds real worlds through the stages before it; `world.test.ts` asserts that `generate('test-1')` twice is identical in every typed array and every name.
 - `src/render/*` (`painter`, `parchment`, `glyphs`, `labels`, `export`), `src/main.ts`, `index.html`, `src/style.css`: the full layer stack of section 6, the label placer, PNG export and the app shell. Viewed and adjusted by eye on 2026-09-17 (relief glyphs on every other cell, stronger border glow, sea labels anchored at the pole of inaccessibility so they stay inside the frame). `labels.ts` has unit tests for the pure placement logic; nothing else in `render/` is unit-tested (the vitest environment is node, no canvas).
-- `src/no-math-random.test.ts`: fails if any non-test file under `src/` uses `Math.random`.
+- `src/gen/tectonics.ts` (stage 3.5): plate seeds grown over the cell graph, drift velocities, convergent/rift stress diffused into belts, continental cratons. Replaces the Gaussian continent mask that shaped the land through `ATLAS_VERSION` 2.
+- The **formation timeline**: `Formation` holds the three time-independent height fields and an absolute sea level, so `rawAtStep` evaluates any moment in one pass rather than storing 24 snapshots. Land fraction is monotonic in the step and lands on `landFraction` at the end. The scroll bar under the map has no dates on it — it is a position in the land's story, not a geological clock — and previews a land/sea silhouette while dragged, regenerating fully when it settles.
+- The **edit layer** (`src/gen/edits.ts`, `src/ui/editor.ts`): rename any settlement, province, nation, culture, river, lake, sea or range, and repaint national borders by province with a finer cell brush for detail. Political state is still written only in `gen/politics.ts`; edits persist to `localStorage` keyed by seed **and formation step**, because province and nation indices are rebuilt at every step. See `docs/EDITING.md`.
+- `src/no-math-random.test.ts`: fails if any non-test file under `src/` uses `Math.random`, `Date`, or `performance.now()` outside the two files that measure timings.
 
 ### Measured in node at the default parameters (seeds atlas, amberfell, test-1, a, zzzzzzzz)
 
@@ -64,7 +70,6 @@ The design document is `docs/ARCHITECTURE.md`: the data contract (`src/core/type
 
 Each item plugs into a seam that already exists; see section 9 of the architecture doc for where.
 
-- Tectonics: plate seeds, uplift and rifts replacing the continent mask inside elevation.
 - Climate sim: latitude wind belts and ocean-proximity temperature behind the same `computeClimate` signature.
 - Hillshade: Gouraud-rasterized corner elevation, Horn gradient, multiplied under the relief glyphs.
 - Roads and trade: cost-path roads, bridges at river sides, sea lanes between ports.
