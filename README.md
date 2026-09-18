@@ -9,7 +9,7 @@ Under the hood the single source of truth is a ~10,000-cell Voronoi graph. Every
 ```
 npm install
 npm run dev        # Vite dev server
-npm test           # vitest: 375 tests in 21 files (core, mesh invariants, every generation stage, determinism, no-Math.random grep)
+npm test           # vitest: 379 tests in 21 files (core, mesh invariants, every generation stage, determinism, repo determinism guard)
 npm run build      # tsc + vite build into dist/
 npm run typecheck  # tsc --noEmit
 ```
@@ -31,7 +31,7 @@ Example: `https://<host>/atlas/#seed=amberfell&land=0.45&wind=2&cells=8`
 
 ## Status: day one complete (2026-09-17), sampler retuned (2026-09-18)
 
-Every module in `docs/ARCHITECTURE.md` section 7 exists, the three gates are green (`npm test`: 375 tests in 21 files; `npm run typecheck`: zero errors; `npm run build`: tsc + vite, ~94 kB of JS) and the app has been run in headless Chromium: four seeds generate and render with zero console errors, the timing readout shows generate at 170-195 ms and a 1x screen render at 65-105 ms, and the 2x PNG export works (about 440 ms). The deployed site is https://meow-woem.github.io/atlas/ (GitHub Pages, built by `.github/workflows/pages.yml` on every push to `main`).
+Every module in `docs/ARCHITECTURE.md` section 7 exists, the three gates are green (`npm test`: 379 tests in 21 files; `npm run typecheck`: zero errors; `npm run build`: tsc + vite, ~94 kB of JS) and the app runs in headless Chromium. Re-checked after the sampler retune on 2026-09-18: seeds `atlas`, `amberfell`, `test-1` and `zzzzzzzz` each generate and render a complete map (coast, relief, rivers, lakes, borders, settlements, labels, cartouche, compass, scale bar) with no console errors from the app, and the 2x PNG export works. Those numbers -- generate 184-333 ms wall, 1x screen render 78-122 ms, 2x export 527 ms -- came from a sandboxed Linux container, so they are slower than the 2026-09-17 laptop run (170-195 ms / 65-105 ms / ~440 ms) and are not comparable to it; the node measurements below are the ones to track. That sandbox cannot reach the webfont CDN, so the run also exercised the fallback-serif path rather than IM Fell English. The deployed site is https://meow-woem.github.io/atlas/ (GitHub Pages, built by `.github/workflows/pages.yml` on every push to `main`).
 
 ### What exists and passes
 
