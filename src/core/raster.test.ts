@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { makeRaster, edt, sampleBilinear, marchingSquares, rasterizeTriangles } from './raster';
+import { makeRaster, edt, sampleBilinear, marchingSquares, rasterizeCells, rasterizeTriangles } from './raster';
 import type { Mesh, Polyline, Raster } from './types';
+import { DEFAULT_PARAMS } from './types';
+import { fork } from './rng';
+import { pointInPolygon } from './geom';
+import { generatePoints } from '../mesh/poisson';
+import { buildMesh, cellPolygon } from '../mesh/dualmesh';
 
 function polylineLength(p: Polyline): number {
   const { pts, closed } = p;
@@ -272,5 +277,93 @@ describe('rasterizeTriangles', () => {
 });
 
 describe('rasterizeCells', () => {
-  it.todo('rasterizeCells: every raster pixel is covered exactly once by the default mesh (needs mesh/dualmesh)');
+  // The contract in raster.ts: "a pixel is covered when its center is inside the polygon (even-odd
+  // rule with the half-open crossing test, so pixels on a shared edge are claimed by exactly one of
+  // two adjacent cells)". Checked against the default mesh with an independent point-in-polygon,
+  // never by re-deriving the scanline: a seam between two cells shows up as an uncovered pixel and
+  // an overlap as a pixel claimed twice.
+  const params = DEFAULT_PARAMS;
+  const { points, numBoundary } = generatePoints(params, fork('raster-cells', 'points'));
+  const mesh = buildMesh(points, numBoundary);
+  const scale = params.rasterScale;
+  const w = Math.round(params.width * scale), h = Math.round(params.height * scale);
+
+  // Every cell polygon once, in raster px, flat with per-region offsets.
+  const off = new Int32Array(mesh.numRegions + 1);
+  const scratch = new Float32Array(64);
+  const counts = new Int32Array(mesh.numRegions);
+  let total = 0;
+  for (let r = 0; r < mesh.numRegions; r++) {
+    const n = cellPolygon(mesh, r, scratch);
+    counts[r] = n < 3 ? 0 : n;
+    total += counts[r];
+  }
+  const poly = new Float32Array(2 * total);
+  const bbox = new Float32Array(4 * mesh.numRegions);
+  for (let r = 0, k = 0; r < mesh.numRegions; r++) {
+    off[r] = k;
+    const n = cellPolygon(mesh, r, scratch);
+    if (counts[r] !== 0) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (let i = 0; i < n; i++) {
+        const x = scratch[2 * i] * scale, y = scratch[2 * i + 1] * scale;
+        poly[2 * k] = x; poly[2 * k + 1] = y; k++;
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+      bbox[4 * r] = x0; bbox[4 * r + 1] = y0; bbox[4 * r + 2] = x1; bbox[4 * r + 3] = y1;
+    }
+    off[r + 1] = k;
+  }
+  const polyOf = (r: number): Float32Array => poly.subarray(2 * off[r], 2 * off[r + 1]);
+
+  it('leaves no pixel uncovered, and every pixel lands in the cell that claims it', () => {
+    const raster = makeRaster(w, h, scale);
+    raster.data.fill(-1);
+    rasterizeCells(mesh, Float32Array.from({ length: mesh.numRegions }, (_, r) => r), raster);
+    let uncovered = 0, outsideOwner = 0, badOwner = 0;
+    for (let j = 0; j < h; j++) {
+      for (let i = 0; i < w; i++) {
+        const v = raster.data[j * w + i];
+        if (v < 0) { uncovered++; continue; }
+        const r = Math.round(v);
+        if (r >= mesh.numRegions || counts[r] === 0) { badOwner++; continue; }
+        if (!pointInPolygon(i + 0.5, j + 0.5, polyOf(r))) outsideOwner++;
+      }
+    }
+    expect(uncovered).toBe(0);
+    expect(badOwner).toBe(0);
+    expect(outsideOwner).toBe(0);
+  });
+
+  it('claims each pixel exactly once: no two cell polygons contain the same pixel center', () => {
+    // Bucket the polygons by bounding box so the containment count only tests real candidates.
+    const bs = 8;                                   // raster px per bucket
+    const bw = Math.ceil(w / bs) + 1, bh = Math.ceil(h / bs) + 1;
+    const buckets: number[][] = Array.from({ length: bw * bh }, () => []);
+    for (let r = 0; r < mesh.numRegions; r++) {
+      if (counts[r] === 0) continue;
+      const i0 = Math.max(0, Math.floor(bbox[4 * r] / bs)), i1 = Math.min(bw - 1, Math.floor(bbox[4 * r + 2] / bs));
+      const j0 = Math.max(0, Math.floor(bbox[4 * r + 1] / bs)), j1 = Math.min(bh - 1, Math.floor(bbox[4 * r + 3] / bs));
+      if (i1 < i0 || j1 < j0) continue;
+      for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) buckets[j * bw + i].push(r);
+    }
+    // Every 5th pixel on each axis: ~7.9k probes, enough to hit every cell several times.
+    let never = 0, twice = 0;
+    for (let j = 2; j < h; j += 5) {
+      for (let i = 2; i < w; i += 5) {
+        const x = i + 0.5, y = j + 0.5;
+        let hits = 0;
+        for (const r of buckets[Math.floor(y / bs) * bw + Math.floor(x / bs)]) {
+          if (pointInPolygon(x, y, polyOf(r))) hits++;
+        }
+        if (hits === 0) never++;
+        else if (hits > 1) twice++;
+      }
+    }
+    expect(never).toBe(0);
+    expect(twice).toBe(0);
+  });
 });
