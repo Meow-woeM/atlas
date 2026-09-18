@@ -57,9 +57,10 @@
  * an open chain would be an upstream inconsistency and is passed through unchanged.
  *
  * Seas: connected components (r_circulate_r) of interior ocean cells, ranked by (size desc, first
- * cell asc); the MAX_SEAS largest become NamedAreas with label_r = the component cell with the
- * minimum r_coastDist (farthest offshore, smaller index on ties) and the PCA axis of the cell
- * positions. Ranges: components of interior cells with r_elevation > RANGE_ELEVATION, at least
+ * cell asc); the MAX_SEAS largest become NamedAreas with label_r = poleOfInaccessibility (the
+ * cell farthest, in hops, from both the coast and the boundary ring, so the label lands inside the
+ * frame; the cell with the minimum r_coastDist sits at the frame edge) and the PCA axis of the
+ * cell positions. Ranges: components of interior cells with r_elevation > RANGE_ELEVATION, at least
  * RANGE_MIN_CELLS cells, ranked the same way, label_r = poleOfInaccessibility. NamedArea ids are
  * the rank within seas / within ranges; cell lists are ascending.
  *
@@ -284,7 +285,7 @@ export function extractFeatures(
   world: Pick<World, 'mesh' | 'edges' | 'geo' | 'params'>, hydro: HydrologyResult,
 ): Features {
   const { mesh, edges, geo } = world;
-  const { r_water, r_elevation, r_coastDist, s_river, distField } = geo;
+  const { r_water, r_elevation, s_river, distField } = geo;
   const { s_start_r, numRegions, numSides, numBoundaryRegions: nb } = mesh;
   const { r_px, r_py } = cellGeometry(mesh);
   const perSide = pointsPerSide(edges);
@@ -383,12 +384,11 @@ export function extractFeatures(
   const seas: NamedArea[] = [];
   for (let i = 0; i < seaCells.length; i++) {
     const cells = seaCells[i];
-    let label = cells[0];
-    for (let k = 1; k < cells.length; k++) {
-      if (r_coastDist[cells[k]] < r_coastDist[label]) label = cells[k];
-    }
     const axis = principalAxis(r_px, r_py, cells);
-    seas.push({ id: i, kind: 'sea', name: '', cells, label_r: label, axisAngle: axis.angle, extent: axis.extent });
+    seas.push({
+      id: i, kind: 'sea', name: '', cells,
+      label_r: poleOfInaccessibility(mesh, cells), axisAngle: axis.angle, extent: axis.extent,
+    });
   }
 
   // ---- ranges: high-elevation components of at least RANGE_MIN_CELLS cells

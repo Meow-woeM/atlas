@@ -448,26 +448,28 @@ for (const w of worlds) {
       expect(ok / total).toBeGreaterThanOrEqual(0.95);
     });
 
-    it('seas: at most 2, interior ocean cells ascending, label_r the cell farthest offshore', () => {
+    it('seas: at most 2, interior ocean cells ascending, label_r the pole of inaccessibility', () => {
       const { seas } = features;
       expect(seas.length).toBeGreaterThanOrEqual(1);
       expect(seas.length).toBeLessThanOrEqual(2);
-      let badKind = 0, badId = 0, notOcean = 0, unsorted = 0, labelOutside = 0, labelNotFarthest = 0, badAxis = 0;
+      let badKind = 0, badId = 0, notOcean = 0, unsorted = 0, labelOutside = 0, labelOnRim = 0, badAxis = 0;
       for (let i = 0; i < seas.length; i++) {
         const sea = seas[i];
         if (sea.kind !== 'sea') badKind++;
         if (sea.id !== i) badId++;
         if (!Number.isFinite(sea.axisAngle) || !(sea.extent >= 0)) badAxis++;
-        let inside = false, minDist = Infinity;
+        let inside = false;
         for (let k = 0; k < sea.cells.length; k++) {
           const r = sea.cells[k];
           if (geo.r_water[r] !== 1 || r_is_boundary(mesh, r)) notOcean++;
           if (k > 0 && sea.cells[k - 1] >= r) unsorted++;
           if (r === sea.label_r) inside = true;
-          if (geo.r_coastDist[r] < minDist) minDist = geo.r_coastDist[r];
         }
         if (!inside) labelOutside++;
-        if (geo.r_coastDist[sea.label_r] !== minDist) labelNotFarthest++;
+        // The pole is never on the rim: every neighbor of the label cell is interior ocean too.
+        const nbrs: number[] = [];
+        r_circulate_r(mesh, sea.label_r, nbrs);
+        for (const q of nbrs) if (geo.r_water[q] !== 1 || r_is_boundary(mesh, q)) { labelOnRim++; break; }
       }
       if (seas.length === 2) expect(seas[0].cells.length).toBeGreaterThanOrEqual(seas[1].cells.length);
       expect(badKind).toBe(0);
@@ -475,7 +477,7 @@ for (const w of worlds) {
       expect(notOcean).toBe(0);
       expect(unsorted).toBe(0);
       expect(labelOutside).toBe(0);
-      expect(labelNotFarthest).toBe(0);
+      expect(labelOnRim).toBe(0);
       expect(badAxis).toBe(0);
     });
 

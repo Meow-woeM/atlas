@@ -482,15 +482,21 @@ function drawRelief(p: Paint): void {
     const variant = rng.int(0, 3);
     const jx = rng.float(-2, 2);
     const jy = rng.float(-2, 2);
+    // One glyph per two cells: at r = 8 a peak is wider than a cell, so drawing every cell piles
+    // the range into a solid wall. Mountains take the even cells, hills the odd ones, so the two
+    // kinds interleave along a slope. The rng is drawn for every candidate so skipping a cell
+    // never shifts another cell's jitter.
+    const mountain = e > RELIEF_MOUNTAIN;
+    if ((r & 1) !== (mountain ? 0 : 1)) continue;
     if (cellCenter(p, r) === 0) continue;
     gx.push(p.cx + jx);
     gy.push(p.cy + jy);
     gvariant.push(variant);
-    if (e > RELIEF_MOUNTAIN) {
-      gsize.push(8 + 16 * (Math.min(e, 1) - RELIEF_MOUNTAIN) / (1 - RELIEF_MOUNTAIN));
+    if (mountain) {
+      gsize.push(6 + 12 * (Math.min(e, 1) - RELIEF_MOUNTAIN) / (1 - RELIEF_MOUNTAIN));
       gmountain.push(1);
     } else {
-      gsize.push(5 + 6 * (e - RELIEF_HILL) / (RELIEF_MOUNTAIN - RELIEF_HILL));
+      gsize.push(4 + 5 * (e - RELIEF_HILL) / (RELIEF_MOUNTAIN - RELIEF_HILL));
       gmountain.push(0);
     }
   }
@@ -508,10 +514,10 @@ function drawRelief(p: Paint): void {
   for (let i = 0; i < count; i++) {
     const g = order[i];
     if (gmountain[g] === 1) {
-      ctx.lineWidth = 1.1;
+      ctx.lineWidth = 0.9;
       drawGlyphAt(ctx, mountainPath(gvariant[g], gsize[g]), gx[g], gy[g], true, true);
     } else {
-      ctx.lineWidth = 0.8;
+      ctx.lineWidth = 0.7;
       drawGlyphAt(ctx, hillPath(gvariant[g], gsize[g]), gx[g], gy[g], false, true);
     }
   }
@@ -670,8 +676,8 @@ function drawBorders(p: Paint): void {
     ctx.save();
     ctx.clip(clipPath);
     ctx.strokeStyle = nations[n].color;
-    ctx.globalAlpha = 0.18;
-    ctx.lineWidth = 9;
+    ctx.globalAlpha = 0.32;
+    ctx.lineWidth = 10;
     ctx.stroke(glow);
     ctx.restore();
   }
@@ -679,7 +685,7 @@ function drawBorders(p: Paint): void {
   const all = new Path2D();
   for (let b = 0; b < borders.length; b++) addPolyline(all, borders[b]);
   ctx.strokeStyle = INK;
-  ctx.globalAlpha = 0.8;
+  ctx.globalAlpha = 0.9;
   ctx.lineWidth = 1;
   ctx.setLineDash([6, 4]);
   ctx.stroke(all);
