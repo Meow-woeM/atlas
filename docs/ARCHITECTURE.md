@@ -400,7 +400,9 @@ Total ≈ 140 ms generation on a 2020 laptop; the 2 s budget is a 10x margin. St
 
 ### Stage 1 — Points
 
-Bridson Poisson-disc in `[0,W]x[0,H]`, `r = cellSpacing`, `k = 30`, background grid `r/√2`, active list consumed with `rng.int`. Then the boundary ring at spacing `r`, `2r` outside the rectangle, prepended so ring regions are `[0, numBoundaryRegions)`. Output: `{ points: Float64Array, numBoundary }`.
+Bridson Poisson-disc in `[0,W]x[0,H]`, `r = cellSpacing`, background grid `r/√2`, active list consumed with `rng.int`. Then the boundary ring at spacing `r`, `2r` outside the rectangle, prepended so ring regions are `[0, numBoundaryRegions)`. Output: `{ points: Float64Array, numBoundary }`.
+
+**Retuned (2026-09-18, `ATLAS_VERSION` 2).** The candidate loop is Roberts' few-candidate variant rather than Bridson's `k = 30` uniform one: `k = 6` candidates per active point, their angles stratified one per `2π/k` sector from a random base angle, and the radius drawn from the narrow annulus `[r, 1.3r)` instead of `[r, 2r)`. Stratified angles plus near-`r` radii pack as densely in 6 candidates as uniform sampling does in 30. The neighbour scan is the 5×5 grid block minus its four corner cells — a point in cell `(gx±2, gy±2)` is always more than `(r/√2)·√2 = r` away — walked centre outwards so a candidate blocked by a near neighbour returns on the first cells. Measured at the default parameters over five seeds: **46.4 ms → 10.6 ms** (−77%), interior points 7,742 → 8,254, min pairwise distance still `≥ r`, worst uncovered gap 9.2 px → 10.4 px, nearest-neighbour CV 0.077 → 0.055 (slightly *more* even than Bridson). Still ~1.3× the 8 ms budget.
 
 ### Stage 2 — Mesh
 

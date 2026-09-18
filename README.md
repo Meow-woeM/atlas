@@ -29,7 +29,7 @@ The seed and the generation parameters live in the URL hash, so a world is share
 
 Example: `https://<host>/atlas/#seed=amberfell&land=0.45&wind=2&cells=8`
 
-## Status: day one complete (2026-09-17)
+## Status: day one complete (2026-09-17), sampler retuned (2026-09-18)
 
 Every module in `docs/ARCHITECTURE.md` section 7 exists, the three gates are green (`npm test`: 375 tests in 21 files; `npm run typecheck`: zero errors; `npm run build`: tsc + vite, ~94 kB of JS) and the app has been run in headless Chromium: four seeds generate and render with zero console errors, the timing readout shows generate at 170-195 ms and a 1x screen render at 65-105 ms, and the 2x PNG export works (about 440 ms). The deployed site is https://meow-woem.github.io/atlas/ (GitHub Pages, built by `.github/workflows/pages.yml` on every push to `main`).
 
@@ -43,17 +43,16 @@ Every module in `docs/ARCHITECTURE.md` section 7 exists, the three gates are gre
 
 ### Measured in node at the default parameters (seeds atlas, amberfell, test-1, a, zzzzzzzz)
 
-~8,200 cells, land fraction 0.416-0.420, 20-27 rivers, 0-5 lakes, 102-109 provinces, 36 settlements (12-20 of them ports), 7 nations and 7 cultures on every seed, 149-158 year-0 events, every name filled, titles such as "The Niknignak Lands" and "The Realms of Epidh". `generate` takes 115-230 ms warm in node (about 90 ms at `cells=12`). The only stage consistently over three times its section 5 budget is `points` (35-70 ms against 8 ms); everything else is within budget or within 2x of it.
+~8,700 cells, land fraction 0.417-0.420, 20-27 rivers, 0-6 lakes, 98-123 provinces, 38-39 settlements (12-24 of them ports), 7-8 nations and 7-8 cultures, 152-175 year-0 events, every name filled, titles such as "The Puserb Lands" and "The Realms of Muqyut". `generate` takes 125-245 ms warm in node (69-97 ms at `cells=12`). No stage is more than ~1.5x its section 5 budget any more: the worst are `elevation` (26 ms against 25), `features` (23 ms against 15) and `distance` (22 ms against 15).
 
 ### Known deviations from the architecture doc
 
-Constants that were retuned after measuring real worlds are marked in the doc: the temperature and rain-shadow formulas (stage 6), the fitted Whittaker band edges and the marsh rule (stage 8), the ~100 province count (stage 9) and the settlement weights (stage 10). The distance field is measured to the ocean coast only (stage 5). Coast and border sides are chained from the twin half-edges the doc names, because Delaunator's winding puts the start region on the walker's right (see `gen/features.ts`).
+The Poisson sampler is Roberts' few-candidate variant, not Bridson's `k = 30` (stage 1, marked in the doc): 46.4 ms -> 10.6 ms at the default parameters, at the cost of ~6% more cells. Other constants that were retuned after measuring real worlds are also marked in the doc: the temperature and rain-shadow formulas (stage 6), the fitted Whittaker band edges and the marsh rule (stage 8), the ~100 province count (stage 9) and the settlement weights (stage 10). The distance field is measured to the ocean coast only (stage 5). Coast and border sides are chained from the twin half-edges the doc names, because Delaunator's winding puts the start region on the walker's right (see `gen/features.ts`).
 
 ### Next
 
-1. **Tune the sampler.** `src/mesh/poisson.ts` is the one stage well over budget; Roberts' few-candidate variant would cut it by ~80% (a `params.version` bump).
-2. **Review pass.** The generation code was written by parallel agents against the contract and verified by its own tests and by eye; an adversarial read for determinism hazards and spec drift is the natural next session.
-3. The roadmap below.
+1. **Review pass.** The generation code was written by parallel agents against the contract and verified by its own tests and by eye; an adversarial read for determinism hazards and spec drift is the natural next session.
+2. The roadmap below.
 
 The order of sacrifice if time is short, and the things never to cut, are in ARCHITECTURE.md section 8.
 

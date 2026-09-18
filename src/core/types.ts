@@ -2,7 +2,7 @@
 // The contract every module codes against. Plain data only (typed arrays + POJOs):
 // structured-cloneable, no classes, no enums, no methods on world data.
 
-export const ATLAS_VERSION = 1;
+export const ATLAS_VERSION = 2;
 
 // ---------------------------------------------------------------- parameters
 
