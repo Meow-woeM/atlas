@@ -13,6 +13,7 @@ import type { Biome, Mesh, WindDir, WorldParams } from '../core/types';
 import { generatePoints } from '../mesh/poisson';
 import { buildMesh, cellPolygon, downwindOrder, r_circulate_r, r_circulate_s } from '../mesh/dualmesh';
 import { computeElevation, computeDistanceField } from './elevation';
+import { computeTectonics } from './tectonics';
 import type { ElevationResult } from './elevation';
 import { computeClimate, computeBiomes, BIOME_COLORS, BIOME_FERTILITY } from './climate';
 import type { ClimateInput } from './climate';
@@ -47,7 +48,7 @@ function climateInput(elev: ElevationResult, r_coastDist: Float32Array): Climate
 
 function build(label: string, params: WorldParams, seed: string): Built {
   const mesh = makeMesh(params, seed);
-  const elev = computeElevation(mesh, params, fork(seed, 'elevation'));
+  const elev = computeElevation(mesh, params, fork(seed, 'elevation'), computeTectonics(mesh, params, fork(seed, 'tectonics')));
   const { r_coastDist } = computeDistanceField(mesh, params, elev.r_water);
   const t0 = performance.now();
   const climate = computeClimate(mesh, params, climateInput(elev, r_coastDist), fork(seed, 'climate'));
@@ -244,13 +245,15 @@ for (const w of worlds) {
     });
 
     it('land above 0.85 is snow', () => {
-      let bad = 0, high = 0;
+      // Non-vacuity is asserted once across every world, below: since the tectonic terrain of
+      // stage 3.5 the 400x300 world at this seed peaks at 0.837, so it has no alpine land to
+      // check, while the default world has dozens of cells above 0.85. Requiring EVERY world to
+      // have some would be a statement about where one seed's mountains land, not about the rule.
+      let bad = 0;
       for (let r = nb; r < n; r++) {
         if (elev.r_water[r] !== 0 || elev.r_elevation[r] <= 0.85) continue;
-        high++;
         if (r_biome[r] !== biome('snow')) bad++;
       }
-      expect(high).toBeGreaterThan(0);
       expect(bad).toBe(0);
     });
 
@@ -345,6 +348,18 @@ for (const w of worlds) {
     });
   });
 }
+
+describe('snow rule coverage', () => {
+  it('some world has land above 0.85, so the snow assertion above is not vacuous', () => {
+    let high = 0;
+    for (const w of worlds) {
+      for (let r = w.mesh.numBoundaryRegions; r < w.mesh.numRegions; r++) {
+        if (w.elev.r_water[r] === 0 && w.elev.r_elevation[r] > 0.85) high++;
+      }
+    }
+    expect(high).toBeGreaterThan(0);
+  });
+});
 
 describe('biome shares over the fitting seeds (DEFAULT_PARAMS, wind from the west)', () => {
   // The targets the 2026-09-16 band edges were fitted to (climate.ts file comment). Each biome is

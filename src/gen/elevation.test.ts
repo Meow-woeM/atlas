@@ -6,11 +6,12 @@
  */
 import { describe, it, expect } from 'vitest';
 import { fork } from '../core/rng';
-import { DEFAULT_PARAMS } from '../core/types';
+import { DEFAULT_PARAMS, FORMATION_STEPS } from '../core/types';
 import type { Mesh, Raster, WorldParams } from '../core/types';
 import { generatePoints } from '../mesh/poisson';
 import { buildMesh, cellPolygon, r_circulate_r } from '../mesh/dualmesh';
-import { computeElevation, computeDistanceField } from './elevation';
+import { computeElevation, computeDistanceField, rawAtStep, landMaskAtStep } from './elevation';
+import { computeTectonics } from './tectonics';
 import type { ElevationResult } from './elevation';
 
 const SMALL: WorldParams = { ...DEFAULT_PARAMS, width: 400, height: 300, cellSpacing: 16 };
@@ -34,7 +35,7 @@ function makeMesh(params: WorldParams, seed: string): Mesh {
 function build(label: string, params: WorldParams, seed: string): Built {
   const mesh = makeMesh(params, seed);
   const t0 = performance.now();
-  const elev = computeElevation(mesh, params, fork(seed, 'elevation'));
+  const elev = computeElevation(mesh, params, fork(seed, 'elevation'), computeTectonics(mesh, params, fork(seed, 'tectonics')));
   const t1 = performance.now();
   const { distField, r_coastDist } = computeDistanceField(mesh, params, elev.r_water);
   const t2 = performance.now();
@@ -292,8 +293,8 @@ describe('determinism', () => {
 
   it('a different elevation seed on the same mesh changes the result', () => {
     const mesh = makeMesh(params, 'det-seed');
-    const a = computeElevation(mesh, params, fork('det-seed', 'elevation'));
-    const b = computeElevation(mesh, params, fork('other-seed', 'elevation'));
+    const a = computeElevation(mesh, params, fork('det-seed', 'elevation'), computeTectonics(mesh, params, fork('det-seed', 'tectonics')));
+    const b = computeElevation(mesh, params, fork('other-seed', 'elevation'), computeTectonics(mesh, params, fork('other-seed', 'tectonics')));
     let diff = 0;
     for (let r = 0; r < mesh.numRegions; r++) if (a.r_elevation[r] !== b.r_elevation[r]) diff++;
     expect(diff).toBeGreaterThan(mesh.numRegions * 0.2);
@@ -304,7 +305,7 @@ describe('determinism', () => {
     for (const continents of [1, 3] as const) {
       const p: WorldParams = { ...params, continents };
       const mesh = makeMesh(p, 'cont-seed');
-      const e = computeElevation(mesh, p, fork('cont-seed', 'elevation'));
+      const e = computeElevation(mesh, p, fork('cont-seed', 'elevation'), computeTectonics(mesh, p, fork('cont-seed', 'tectonics')));
       let land = 0, margin = 0;
       for (let r = mesh.numBoundaryRegions; r < mesh.numRegions; r++) {
         if (e.r_water[r] !== 0) continue;
@@ -327,5 +328,91 @@ describe('timings', () => {
       );
     }
     expect(worlds[0].msElevation).toBeLessThan(500);
+  });
+});
+
+describe('formation timeline', () => {
+  const SEEDS = ['atlas', 'amberfell', 'test-1', 'zzzzzzzz'];
+  const built = SEEDS.map((seed) => {
+    const p = DEFAULT_PARAMS;
+    const { points, numBoundary } = generatePoints(p, fork(seed, 'points'));
+    const mesh = buildMesh(points, numBoundary);
+    const tec = computeTectonics(mesh, p, fork(seed, 'tectonics'));
+    return { seed, mesh, elev: computeElevation(mesh, p, fork(seed, 'elevation'), tec) };
+  });
+
+  function landFractionAt(mesh: Mesh, f: ReturnType<typeof computeElevation>['formation'], step: number): number {
+    const mask = landMaskAtStep(mesh, f, step);
+    let land = 0;
+    for (let r = mesh.numBoundaryRegions; r < mesh.numRegions; r++) if (mask[r] === 1) land++;
+    return land / (mesh.numRegions - mesh.numBoundaryRegions);
+  }
+
+  it('never loses land as time runs forward', () => {
+    // The promise the scroll bar makes: continents rise through a fixed sea, they do not come and
+    // go. Sea level is absolute (the landFraction quantile at the last step), and every ramp in
+    // rawAtStep is non-decreasing in u, so land can only be gained.
+    let drops = 0;
+    for (const { mesh, elev } of built) {
+      let prev = -1;
+      for (let step = 0; step < FORMATION_STEPS; step++) {
+        const frac = landFractionAt(mesh, elev.formation, step);
+        if (frac < prev - 1e-9) drops++;
+        prev = frac;
+      }
+    }
+    expect(drops).toBe(0);
+  });
+
+  it('starts mostly ocean and ends at params.landFraction', () => {
+    for (const { seed, mesh, elev } of built) {
+      const first = landFractionAt(mesh, elev.formation, 0);
+      const last = landFractionAt(mesh, elev.formation, FORMATION_STEPS - 1);
+      expect(first, seed).toBeLessThan(0.2);
+      expect(last, seed).toBeGreaterThan(first);
+      // The last step is the world as if there were no timeline at all.
+      expect(Math.abs(last - DEFAULT_PARAMS.landFraction), seed).toBeLessThan(0.02);
+    }
+  });
+
+  it('keeps the boundary ring under water at every step', () => {
+    let wet = 0;
+    for (const { mesh, elev } of built) {
+      for (let step = 0; step < FORMATION_STEPS; step += 4) {
+        const mask = landMaskAtStep(mesh, elev.formation, step);
+        for (let r = 0; r < mesh.numBoundaryRegions; r++) if (mask[r] !== 0) wet++;
+      }
+    }
+    expect(wet).toBe(0);
+  });
+
+  it('rawAtStep is deterministic, fills an out array, and clamps out-of-range steps', () => {
+    const { mesh, elev } = built[0];
+    const a = rawAtStep(elev.formation, 5);
+    const out = new Float32Array(mesh.numRegions);
+    const b = rawAtStep(elev.formation, 5, out);
+    expect(b).toBe(out);
+    expect(b).toEqual(a);
+    expect(rawAtStep(elev.formation, -10)).toEqual(rawAtStep(elev.formation, 0));
+    expect(rawAtStep(elev.formation, 999)).toEqual(rawAtStep(elev.formation, FORMATION_STEPS - 1));
+  });
+
+  it('generating at an earlier step really changes the world', () => {
+    const p = DEFAULT_PARAMS;
+    const early: WorldParams = { ...p, formationStep: 4 };
+    const { points, numBoundary } = generatePoints(p, fork('step', 'points'));
+    const mesh = buildMesh(points, numBoundary);
+    const tec = computeTectonics(mesh, p, fork('step', 'tectonics'));
+    const now = computeElevation(mesh, p, fork('step', 'elevation'), tec);
+    const then = computeElevation(mesh, early, fork('step', 'elevation'), tec);
+    let nowLand = 0, thenLand = 0;
+    for (let r = mesh.numBoundaryRegions; r < mesh.numRegions; r++) {
+      if (now.r_water[r] === 0) nowLand++;
+      if (then.r_water[r] === 0) thenLand++;
+    }
+    expect(thenLand).toBeLessThan(nowLand);
+    // The plates do not move, so the same fields back the two moments.
+    expect(then.formation.seaLevel).toBe(now.formation.seaLevel);
+    expect(then.formation.r_craton).toEqual(now.formation.r_craton);
   });
 });

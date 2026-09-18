@@ -8,8 +8,8 @@
  *
  * The last describe re-measures the 2026-09-17 retune targets over the four seeds the weights were
  * tuned on (atlas, amberfell, test-1, zzzzzzzz at DEFAULT_PARAMS) with loose bounds: 32-40
- * settlements, 25-55% ports on average, >= 30% inland, 35-70% river-side, cities more than 6 land
- * hops apart, and 5-8 nations out of the real foundNations (politics.ts is imported for that one
+ * settlements, 25-60% ports on average, >= 30% inland, 35-70% river-side, cities more than 6 land
+ * hops apart, and 5-11 nations out of the real foundNations (politics.ts is imported for that one
  * check only).
  */
 import { describe, it, expect } from 'vitest';
@@ -20,6 +20,7 @@ import { generatePoints } from '../mesh/poisson';
 import { buildMesh, r_circulate_r, r_circulate_s, s_end_r, s_inner_t, s_outer_t, t_circulate_r } from '../mesh/dualmesh';
 import { buildNoisyEdges } from '../mesh/noisy';
 import { computeElevation, computeDistanceField } from './elevation';
+import { computeTectonics } from './tectonics';
 import { computeClimate, computeBiomes, BIOME_FERTILITY } from './climate';
 import { computeHydrology } from './hydrology';
 import { computeProvinces } from './provinces';
@@ -63,7 +64,7 @@ function buildGeography(params: WorldParams, seed: string): { mesh: Mesh; edges:
   const { points, numBoundary } = generatePoints(params, fork(seed, 'points'));
   const mesh = buildMesh(points, numBoundary);
   const edges = buildNoisyEdges(mesh, fork(seed, 'edges'));
-  const elev = computeElevation(mesh, params, fork(seed, 'elevation'));
+  const elev = computeElevation(mesh, params, fork(seed, 'elevation'), computeTectonics(mesh, params, fork(seed, 'tectonics')));
   const { distField, r_coastDist } = computeDistanceField(mesh, params, elev.r_water);
   const climate = computeClimate(
     mesh, params,
@@ -463,12 +464,17 @@ describe('settlements (2026-09-17 retune targets over four seeds at DEFAULT_PARA
     expect(outside).toBe(0);
   });
 
-  it('makes 25-55% of them ports on average (20-65% on any seed)', () => {
+  // Re-fitted 2026-09-18 for the tectonic terrain of stage 3.5 (was 25-55% average, 20-65% per
+  // seed, fitted 2026-09-17 against the Gaussian continent blobs). Plate cratons give a longer,
+  // more indented coastline per unit of land than a smooth blob did — mean distance from land to
+  // the sea fell to about 40 px — so more of the best settlement sites touch the ocean. Measured
+  // over these four seeds: 62 / 66 / 62 / 39%, average 57%.
+  it('makes 25-60% of them ports on average (20-70% on any seed)', () => {
     let sum = 0, outside = 0;
-    for (const x of shares) { sum += x.ports; if (x.ports < 0.2 || x.ports > 0.65) outside++; }
+    for (const x of shares) { sum += x.ports; if (x.ports < 0.2 || x.ports > 0.7) outside++; }
     expect(outside).toBe(0);
     expect(sum / shares.length).toBeGreaterThanOrEqual(0.25);
-    expect(sum / shares.length).toBeLessThanOrEqual(0.55);
+    expect(sum / shares.length).toBeLessThanOrEqual(0.6);
   });
 
   it('keeps at least 30% inland (no ocean neighbour) on every seed', () => {
@@ -491,9 +497,13 @@ describe('settlements (2026-09-17 retune targets over four seeds at DEFAULT_PARA
     expect(close).toBe(0);
   });
 
-  it('yields 5-8 nations from foundNations on every seed', () => {
+  // Re-fitted 2026-09-18 for the tectonic terrain (was 5-8). The upper end is free cities, not
+  // capitals: nationsMax still caps the capital-seeded nations at 8, and a more fragmented
+  // coastline leaves more islands holding a settlement, each of which becomes its own polity.
+  // Measured over these four seeds: 10 / 8 / 8 / 8.
+  it('yields 5-11 nations from foundNations on every seed', () => {
     let outside = 0;
-    for (const n of nationsOf) if (n < 5 || n > 8) outside++;
+    for (const n of nationsOf) if (n < 5 || n > 11) outside++;
     expect(outside).toBe(0);
   });
 });

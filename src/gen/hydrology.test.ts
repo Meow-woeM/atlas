@@ -15,6 +15,7 @@ import {
   buildMesh, r_circulate_r, r_circulate_t, t_circulate_r, t_circulate_t, s_inner_t, s_outer_t,
 } from '../mesh/dualmesh';
 import { computeElevation, computeDistanceField } from './elevation';
+import { computeTectonics } from './tectonics';
 import { computeClimate } from './climate';
 import { computeHydrology } from './hydrology';
 import type { HydrologyResult } from './hydrology';
@@ -40,7 +41,7 @@ interface Built {
 function build(label: string, params: WorldParams, seed: string): Built {
   const { points, numBoundary } = generatePoints(params, fork(seed, 'points'));
   const mesh = buildMesh(points, numBoundary);
-  const elev = computeElevation(mesh, params, fork(seed, 'elevation'));
+  const elev = computeElevation(mesh, params, fork(seed, 'elevation'), computeTectonics(mesh, params, fork(seed, 'tectonics')));
   const { r_coastDist } = computeDistanceField(mesh, params, elev.r_water);
   const climate = computeClimate(
     mesh, params,
