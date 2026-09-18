@@ -79,7 +79,7 @@ export interface Geography {
   r_elevation: Float32Array;   // -1..1, 0 = sea level, water < 0
   r_water: Uint8Array;         // WaterKind
   r_coastHops: Int16Array;     // BFS hops to nearest ocean cell (0 on ocean)
-  r_coastDist: Float32Array;   // signed Euclidean px to the coastline (+ land, - water), from distField
+  r_coastDist: Float32Array;   // signed Euclidean px to the ocean coastline (+ land and inland water, - ocean), from distField
   r_lat: Float32Array;         // degrees, from frame
   r_lon: Float32Array;         // degrees, from frame
   r_temperature: Float32Array; // 0..1

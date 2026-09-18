@@ -73,11 +73,13 @@ export function polylineLength(pts: Float32Array, closed: boolean): number {
 }
 
 /**
- * Hand-drawn wobble: displaces every point along its unit normal (left of the direction of
- * travel) by amplitude * noise(arcLength / wavelength), where arcLength is the cumulative
- * distance from point 0. The normal at a point is perpendicular to the chord between its
- * neighbours (wrapping when closed). Endpoints of OPEN polylines are pinned (not displaced) so
- * river mouths stay on the coast and frame corners meet. Returns a new array.
+ * Hand-drawn wobble: displaces every point along the unit normal (-ty, tx) of its tangent
+ * (tx, ty) by amplitude * noise(arcLength / wavelength), where arcLength is the cumulative
+ * distance from point 0. In y-down screen space that normal is the walker's RIGHT (the left
+ * normal would be (ty, -tx)); a positive noise value pushes a coast-walker's point toward the
+ * water. The tangent at a point is the chord between its neighbours (wrapping when closed).
+ * Endpoints of OPEN polylines are pinned (not displaced) so river mouths stay on the coast and
+ * frame corners meet. Returns a new array.
  */
 export function wobble(
   pts: Float32Array, closed: boolean, noise: Noise1, amplitude: number, wavelength: number,

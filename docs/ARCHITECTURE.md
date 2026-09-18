@@ -60,7 +60,7 @@ Some effects are honestly per-pixel: thin parallel waterlines that stay correct 
 - `edt(mask)` — Meijster/Felzenszwalb exact signed Euclidean distance transform (two separable passes, ~8 ms).
 - `marchingSquares(field, iso)` with linear interpolation and endpoint-hash ring stitching (~3 ms per iso).
 
-Day one uses it for the land mask only. `Geography.distField` keeps the EDT; `r_coastDist` is that field sampled at cell centers (signed px: +land, −water) and is the continentality/harbor term for climate and settlements. The raster is regenerated from the mesh whenever needed and never serialized.
+Day one uses it for the land mask only. `Geography.distField` keeps the EDT; `r_coastDist` is that field sampled at cell centers (signed px: + land and inland water, − ocean; the field is ocean-only) and is the continentality/harbor term for climate and settlements. The raster is regenerated from the mesh whenever needed and never serialized.
 
 ### 3.3 Where things live
 
@@ -164,7 +164,7 @@ export interface Geography {
   r_elevation: Float32Array;   // -1..1, 0 = sea level, water < 0
   r_water: Uint8Array;         // WaterKind
   r_coastHops: Int16Array;     // BFS hops to nearest ocean cell (0 on ocean)
-  r_coastDist: Float32Array;   // signed Euclidean px to the coastline (+ land, - water), from distField
+  r_coastDist: Float32Array;   // signed Euclidean px to the ocean coastline (+ land and inland water, - ocean), from distField
   r_lat: Float32Array;         // degrees, from frame
   r_lon: Float32Array;         // degrees, from frame
   r_temperature: Float32Array; // 0..1
@@ -392,7 +392,7 @@ export interface RenderOptions {
 | 14 | Political view | `gen/features.ts` | — | mesh, edges, politics | `PoliticalView` (held by main, not in World) | 5 ms |
 | 15 | History log | `gen/world.ts` | — | all | `history.events` (~200 year-0 events) | 1 ms |
 
-Total ≈ 140 ms generation on a 2020 laptop; the 2 s budget is a 10x margin.
+Total ≈ 140 ms generation on a 2020 laptop; the 2 s budget is a 10x margin. Stages 12 and 13 execute in the order **features, names**: `assignNames` needs the rivers, lakes, seas and ranges to exist, while `extractFeatures` needs only the mesh, the noisy edges, the geography and the hydrology result; every stage draws from its own fork, so the numbering above is the naming order and `generate` records `timings` under the keys `points, mesh, edges, elevation, distance, climate, hydrology, biomes, features, provinces, settlements, politics, names, history` in execution order.
 
 ### Stage 0 — Seed and streams
 
@@ -423,13 +423,13 @@ For each canonical side (`s < s_opposite_s[s]` or hull), take the quad `(r_a, t_
 
 ### Stage 5 — Distance field
 
-`rasterizeCells(mesh, r_water === 0 ? 1 : 0, 512, 384)` → land mask; `edt(mask)` → signed distance in raster px, multiplied by `1/rasterScale` into logical px → `distField`. `r_coastDist[r] = bilinear(distField, r_x, r_y)`. No RNG.
+`rasterizeCells(mesh, r_water === 1 ? 0 : 1, 512, 384)` → mask of everything that is not ocean (land and inland water), so the field measures distance to the ocean coastline only and hydrology's lake decisions never invalidate it; `edt(mask)` → signed distance in raster px, multiplied by `1/rasterScale` into logical px → `distField`. `r_coastDist[r] = bilinear(distField, r_x, r_y)`. No RNG.
 
 ### Stage 6 — Climate
 
 - `windDir` = params or `rng.int(0,7)`.
-- Temperature: `base = 1 − (|lat| / 70)` clamped, `r_temperature = clamp(base^1.1 − 0.55·max(0, elevation), 0, 1)` (lapse-rate analogue).
-- Moisture: sort cells by `dot(pos, windVector)` (`downwindOrder`, one of the four coordinate helpers), sweep downwind. Ocean cells carry 1.0, lakes 0.8. Land cell: `carried = max over upwind neighbors (m[nbr]·0.985 − 2.5·max(0, elev[r] − elev[nbr]))`, floored at 0.04; then `r_moisture = 0.7·carried + 0.3·(1 − clamp(r_coastDist / 260, 0, 1))`. Rain shadows behind ridges come out of the subtraction term. The roadmap climate sim replaces this file behind the same signature.
+- Temperature: `base = 1 − (|lat| / 90)^1.5` (0.83 at 28 N, 0.48 at 58 N), `r_temperature = clamp(base − 0.55·max(0, elevation)^2, 0, 1)` (lapse-rate analogue; squared so only high mountains go cold, the northern lowlands read boreal and the southern lowlands subtropical).
+- Moisture: sort cells by `dot(pos, windVector)` (`downwindOrder`, one of the four coordinate helpers), sweep downwind. Ocean cells carry 1.0, lakes 0.8. Land cell: `carried = max over upwind neighbors (m[nbr]·0.985 − 2.5·max(0, elev[r] − elev[nbr] − 0.04))`, floored at 0.04; then `r_moisture = 0.7·carried + 0.3·(1 − clamp(r_coastDist / 260, 0, 1))`. Rain shadows behind ridges come out of the subtraction term; the 0.04 per-hop allowance ignores the gentle inland climb of the stage-4 reshape (which would otherwise exhaust the carried moisture within ~8 hops of a windward coast) and charges only real ridges. The roadmap climate sim replaces this file behind the same signature.
 
 ### Stage 7 — Hydrology (corner graph)
 
@@ -442,15 +442,15 @@ For each canonical side (`s < s_opposite_s[s]` or hull), take the quad `(r_a, t_
 
 ### Stage 8 — Biomes
 
-Whittaker lookup: 4 temperature bands x 6 moisture bands (mapgen2 table) into `BIOMES`. Adjustments before lookup: +0.10 moisture for cells with a river side or lake neighbor (floodplains read fertile); coast cells with `elevation < 0.08` and `moisture > 0.7` → `marsh`; `elevation > 0.85` → `snow` regardless. Water cells get `ocean`/`lake`.
+Whittaker lookup: 4 temperature bands x 6 moisture bands (mapgen2 table) into `BIOMES`; the band edges are fitted constants in `gen/climate.ts` (temperature 0.35 / 0.50 / 0.65, moisture 0.45 / 0.50 / 0.63 / 0.70 / 0.86, fitted 2026-09-16 to the stage-6 distributions at the default params). Adjustments before lookup: +0.10 moisture for wet cells — a river side, lake neighbor or lake corner (floodplains read fertile); wet coast cells with `elevation < 0.08` and adjusted `moisture > 0.7` → `marsh` (a river mouth or lakeshore on the coast, ~1% of land; a wet climate alone never makes one); `elevation > 0.85` → `snow` regardless. Water cells get `ocean`/`lake`.
 
 ### Stage 9 — Provinces (grafted from the sim pitch)
 
-Sites: Bridson Poisson-disc restricted to land cells with radius `provinceSpacing / sqrt(fertility + 0.25)` (dense in fertile lowlands, sparse in deserts and mountains), ~140 sites at defaults. Growth: multi-source Dijkstra over the land-cell graph with cost `1 + 4·|Δelev| + 5·(side carries a river) + 0.5·(biome changes) + 2·(elev > 0.6)`, so province borders hug rivers and ridgelines. Then a single pass over sides builds the CSR `ProvinceGraph` with shared border lengths (`polylineLength` of the noisy side path), centroids, areas, coastal flags and mean fertility. Islands with no site get one site at their most fertile cell. Provinces are independent of settlements on purpose: history will found and raze cities without touching the political unit.
+Sites: Bridson Poisson-disc restricted to land cells with radius `provinceSpacing / sqrt(fertility + 0.25)` (dense in fertile lowlands, sparse in deserts and mountains), ~100 sites (measured 92-108 at defaults). Growth: multi-source Dijkstra over the land-cell graph with cost `1 + 4·|Δelev| + 5·(side carries a river) + 0.5·(biome changes) + 2·(elev > 0.6)`, so province borders hug rivers and ridgelines. Then a single pass over sides builds the CSR `ProvinceGraph` with shared border lengths (`polylineLength` of the noisy side path), centroids, areas, coastal flags and mean fertility. Islands with no site get one site at their most fertile cell. Provinces are independent of settlements on purpose: history will found and raze cities without touching the political unit.
 
 ### Stage 10 — Settlements
 
-Score every land cell: `fertility[biome] + 0.6·coast + 0.8·riverSide + 1.2·riverMouth + 0.5·harbor − 1.0·elevation − 1.5·slope + 0.2·rng.next()`, where `harbor` = 1 if the cell has 1–3 ocean neighbors and `r_coastDist` of those neighbors' offshore side suggests shelter (mean `distField` within 24 px offshore > −12). Greedy placement with suppression: pick the best, then subtract a falloff from every cell within BFS depth 7; repeat until `n = clamp(landCells / 150, 15, settlementsMax)`. Kind by rank: top 20% cities, next 35% towns, rest villages; population = kind base x (0.7 + 0.6·rng). `port`, `riverMouth`, `river`, `province` set from the cell. Each province's `seat` = its highest-scoring settlement.
+Score every land cell: `2.0·fertility[biome] + 0.05·coast + 0.5·riverSide + 0.3·riverMouth + 0.05·harbor − 1.0·elevation − 1.5·slope + 0.2·rng.next()` (weights retuned 2026-09-17: the original `0.6 / 0.8 / 1.2 / 0.5` on fertility x1 made every settlement a river-mouth port; the coast is already favoured by its fertile biomes and low elevation, and nearly every coastal cell passes the harbor test, so coast + harbor act as one 0.1 weight), where `harbor` = 1 if the cell has 1–3 ocean neighbors and `r_coastDist` of those neighbors' offshore side suggests shelter (mean `distField` within 24 px offshore > −12). Landmasses (land components) under 20 cells take no settlement: an islet lies outside every mainland suppression BFS and would otherwise always collect one, which politics then turns into a free-city nation. Greedy placement with suppression: pick the best, then subtract `2.5·(1 − depth/10)` from every cell within BFS depth 9 over land; repeat until `n = clamp(landCells / 90, 15, settlementsMax)` (measured at defaults over four seeds: 36 settlements, 39–56% ports, 42–50% river-side, 7 nations). Kind by rank: top 20% cities, next 35% towns, rest villages; population = kind base x (0.7 + 0.6·rng). `port`, `riverMouth`, `river`, `province` set from the cell. Each province's `seat` = its highest-scoring settlement.
 
 ### Stage 11 — Cultures and nations
 
@@ -478,7 +478,7 @@ Nothing in this stage writes to any geography object, and nothing outside `Polit
 
 ### Stage 15 — History log
 
-`world.created` (data: title, seed), then the stage-11 events in generation order, all at `year 0`. ~200 events, plain objects.
+`history.events[0]` is `world.created` (`seq 0`, `year 0`, no subjects, data `{ title: worldTitle(world), seed }`), followed by the stage-11 events in their generation order, re-numbered so that `seq` is the position in the final array (each stage-11 seq + 1) and every `cause` shifted by +1 to keep pointing at the same event. All at `year 0`; ~200 plain objects. `gen/world.ts` also assembles `Geography` between stages 7 and 8: `r_elevation` is a copy of the stage-4 array in which hydrology's reverted lake candidates (`HydrologyResult.revertedCells`, cells that arrived as `r_water 2` and leave as land) are lifted to `max(0.005, mean stage-4 elevation of their land neighbours above 0)` (0.005 when there is none), `r_slope` is recomputed for those cells and their neighbours and `r_coastHops` restated as 1 + the minimum neighbour hops; `r_water` is hydrology's copy; `r_biome` is computed after hydrology from that geography. `toWorldFile` stores `p_nation` / `p_culture` as base64 of their little-endian Int16 bytes (node `Buffer` or `btoa` / `atob`, feature-detected); `fromWorldFile` refuses a file whose `v` is not `ATLAS_VERSION`, regenerates, restores the two arrays (their length must equal the regenerated province count), reruns `derivePolitics` and sets `year` and `events`.
 
 ## 6. Rendering
 
@@ -841,7 +841,7 @@ Tectonic plates; real wind/temperature simulation; roads and trade routes; the y
 - `elevation.test.ts`: land fraction within 1% of `params.landFraction`; every boundary region is ocean; ≥ 40 px ocean margin.
 - `hydrology.test.ts`: every land corner has a strictly lower neighbor after filling; walking `t_downslope_s` from every land corner terminates at ocean or lake within `numTriangles` steps; every river's mouth corner is ocean or lake; `s_river` is mirrored on twins.
 - `politics.test.ts`: every province with a settlement has a nation; `r_nation` equals `p_nation[r_province[r]]`; every `province.claimed` event's subject is owned by that nation.
-- `world.test.ts`: `generate('test-1')` twice produces byte-identical typed arrays; `generate` at `cellSpacing 12` finishes under 100 ms in node.
+- `world.test.ts`: `generate('test-1')` twice produces byte-identical typed arrays and names; `generate` at `cellSpacing 12` (measured 80–95 ms in node, 2026-09-17) stays under a self-calibrated bound of max(3 x best-of-3, 500 ms); 14 timing keys; the stage-15 log invariants; the save-file round trip; the reverted-lake patch.
 - `features.test.ts`: every coast loop is closed and non-degenerate; the sum of coast loop areas equals the land cell area within 5%.
 - `no-math-random.test.ts`: `grep -r "Math.random" src/` returns only `main.ts`.
 - Rendering has no unit tests on day one; it is verified by eye and by the timing readout. A later session adds a headless pixel snapshot via `@napi-rs/canvas`.
