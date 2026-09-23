@@ -66,7 +66,7 @@ import type { Language, MorphemeKind, World } from '../core/types';
 import type { Rng } from '../core/rng';
 import { fork } from '../core/rng';
 import { r_circulate_r, s_inner_t, s_outer_t, t_circulate_r } from '../mesh/dualmesh';
-import { makeLanguage, makeWord } from './language';
+import { ENDS_WITH_VOWEL, makeLanguage, makeWord } from './language';
 import type { Edits } from './edits';
 import { parseId } from '../core/ids';
 
@@ -133,10 +133,10 @@ function uniqueName(used: Set<string>, rng: Rng, lang: Language, gen: (rng: Rng)
   }
 }
 
-/** True if the last letter of a spelled word is a vowel (diacritics ignored). */
+/** True if the last letter of a spelled word is a vowel, accented or not. Uses language.ts's
+ *  literal vowel table rather than normalize()/\p{M} so names never depend on the runtime's ICU. */
 function endsWithVowel(word: string): boolean {
-  const plain = word.normalize('NFD').replace(/\p{M}/gu, '');
-  return /[aeiou]$/i.test(plain);
+  return ENDS_WITH_VOWEL.test(word);
 }
 
 /** Argmax with the smaller index on ties; 0 when every count is 0 (or the tally is empty). */

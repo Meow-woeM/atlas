@@ -27,6 +27,7 @@ const LAYER_KEYS = [
 
 const FONT_TIMEOUT_MS = 1500;
 const FONT_TEXT = '12px "IM Fell English"';
+const FONT_TEXT_ITALIC = 'italic ' + FONT_TEXT;
 const FONT_SMALLCAPS = '12px "IM Fell English SC"';
 const WIND_NAMES = ['W', 'NW', 'N', 'NE', 'E', 'SE', 'S', 'SW'] as const;
 const SEED_ALPHABET = 'abcdefghijklmnopqrstuvwxyz';
@@ -77,17 +78,30 @@ function randomSeed(): string {
   return s;
 }
 
-function parseWind(raw: string | null): WindDir | 'random' | undefined {
+/**
+ * Trims a hash value; an absent, empty or whitespace-only value counts as missing. URLSearchParams
+ * yields '' (not null) for `#cells=` and a bare `#cells`, and Number('') is 0, which would otherwise
+ * clamp to the range minimum instead of falling back to the default.
+ */
+function hashValue(raw: string | null): string | undefined {
   if (raw === null) return undefined;
-  if (raw === 'random') return 'random';
-  const n = Number(raw);
+  const s = raw.trim();
+  return s === '' ? undefined : s;
+}
+
+function parseWind(raw: string | null): WindDir | 'random' | undefined {
+  const s = hashValue(raw);
+  if (s === undefined) return undefined;
+  if (s === 'random') return 'random';
+  const n = Number(s);
   if (Number.isInteger(n) && n >= 0 && n <= 7) return n as WindDir;
   return undefined;
 }
 
 function parseNumber(raw: string | null, lo: number, hi: number): number | undefined {
-  if (raw === null) return undefined;
-  const n = Number(raw);
+  const s = hashValue(raw);
+  if (s === undefined) return undefined;
+  const n = Number(s);
   if (!Number.isFinite(n)) return undefined;
   return Math.min(hi, Math.max(lo, n));
 }
@@ -95,7 +109,6 @@ function parseNumber(raw: string | null, lo: number, hi: number): number | undef
 /** Reads #seed=<s>&land=<f>&wind=<d>&cells=<r>. Missing or malformed values fall back to defaults. */
 function readHash(): { seed: string | null; params: WorldParams } {
   const q = new URLSearchParams(location.hash.replace(/^#/, ''));
-  const seed = q.get('seed');
   const next: WorldParams = { ...DEFAULT_PARAMS, frame: { ...DEFAULT_PARAMS.frame } };
   const land = parseNumber(q.get('land'), 0.05, 0.95);
   if (land !== undefined) next.landFraction = land;
@@ -103,7 +116,7 @@ function readHash(): { seed: string | null; params: WorldParams } {
   if (wind !== undefined) next.windDir = wind;
   const cells = parseNumber(q.get('cells'), 4, 32);
   if (cells !== undefined) next.cellSpacing = cells;
-  return { seed: seed !== null && seed.trim() !== '' ? seed.trim() : null, params: next };
+  return { seed: hashValue(q.get('seed')) ?? null, params: next };
 }
 
 function writeHash(seed: string, p: WorldParams): void {
@@ -130,11 +143,16 @@ function applyLayers(layers: LayerToggles): void {
 
 // ---------------------------------------------------------------- fonts
 
-/** Resolves true once both Fell faces are usable, false if that takes longer than timeoutMs. */
+/**
+ * Resolves true once all three Fell faces the renderer draws with (regular, italic, small caps) are
+ * usable, false if that takes longer than timeoutMs. The italic is its own @font-face, so loading only
+ * the regular descriptor would leave sea and river labels in the fallback italic until a later repaint.
+ */
 function waitForFonts(timeoutMs: number): Promise<boolean> {
   if (!('fonts' in document)) return Promise.resolve(false);
-  const load = Promise.all([document.fonts.load(FONT_TEXT), document.fonts.load(FONT_SMALLCAPS)])
-    .then((faces) => faces.every((list) => list.length > 0), () => false);
+  const load = Promise.all([
+    document.fonts.load(FONT_TEXT), document.fonts.load(FONT_TEXT_ITALIC), document.fonts.load(FONT_SMALLCAPS),
+  ]).then((faces) => faces.every((list) => list.length > 0), () => false);
   const timeout = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs));
   // If the fonts arrive after the deadline, flip the flag and repaint so labels pick up the real face.
   void load.then((ok) => {

@@ -243,6 +243,12 @@ const SETTLEMENT_SIZE: Record<SettlementKind, number> = { city: 13, town: 10, vi
 const SETTLEMENT_RANK: Record<SettlementKind, number> = { city: 1, town: 2, village: 3 };
 const ICON_HALF: Record<SettlementKind, number> = { city: 5, town: 3.5, village: 2 };
 const ICON_GAP = 4;
+/**
+ * Port anchor tick as a box offset from the settlement's cell center: the painter strokes
+ * anchorPath (ink spans x -2.25..2.25, y -3.1..2.75 with its 0.7 px line) at center + (6, 6),
+ * so the tick occupies [3.75, 2.9, 8.25, 8.75]; padded to the quarter px.
+ */
+const ANCHOR_BOX: Box = [3.5, 2.75, 8.5, 8.75];
 const NATION_TRACKING = 0.15;
 const SEA_SIZE = 16;
 const SEA_TRACKING = 0.25;
@@ -273,7 +279,9 @@ export function placeLabels(world: World, view: PoliticalView, measure: MeasureF
   const settlements = world.settlements;
   const nations = world.politics.nations;
 
-  // Settlement icons block text so no label covers a neighbor's marker.
+  // Settlement icons block text so no label covers a marker, and a port's anchor tick blocks too
+  // (a town or village's SE offset would otherwise sit on it). Every box is anchored at the cell
+  // center r_x/r_y, the point painter.ts drawSettlements must draw the glyphs at.
   const isCapital = new Uint8Array(settlements.length);
   for (let i = 0; i < nations.length; i++) {
     const n = nations[i];
@@ -284,6 +292,9 @@ export function placeLabels(world: World, view: PoliticalView, measure: MeasureF
     if (s.died !== -1) continue;
     const half = ICON_HALF[s.kind] + (isCapital[i] ? 1 : 0);
     boxes.push([rx[s.r] - half, ry[s.r] - half, rx[s.r] + half, ry[s.r] + half]);
+    if (s.port) {
+      boxes.push([rx[s.r] + ANCHOR_BOX[0], ry[s.r] + ANCHOR_BOX[1], rx[s.r] + ANCHOR_BOX[2], ry[s.r] + ANCHOR_BOX[3]]);
+    }
   }
 
   // 1. Nations: always placed.

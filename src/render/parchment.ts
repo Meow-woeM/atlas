@@ -1,16 +1,22 @@
 /**
  * render/parchment.ts — Render layers 1 (parchment) and 4 (biome tint): the two raster-sampled
  * offscreen canvases the painter composites. Both are built at OUTPUT (device) pixel size so grain
- * and tint softness are constant in millimetres across export scales, and both are cached in an LRU
- * of 4 entries keyed seed + 'x' + wPx + 'x' + hPx.
+ * and tint softness are constant in millimetres across export scales. Parchment sheets of at most
+ * PARCHMENT_CACHE_MAX_BYTES (32 MiB of RGBA: every screen size up to a dpr-3 1024x768 frame and
+ * the 1x / 2x exports) are cached in an LRU of 4 keyed seed + 'x' + wPx + 'x' + hPx; a larger
+ * sheet (the 4x export, 48 MiB) is built, blitted and dropped, so an export never evicts the
+ * screen sheet that layer toggles reuse. Tint canvases are cached per World object in a WeakMap
+ * (an entry dies with its World; no World is pinned) holding an LRU of 4 sizes each.
  *
- * RNG stream: fork(seed, 'ink', 'parchment'), consumed in this order:
- *   1. makeValueNoise2 builds its tables (one 256-entry shuffle + 256 floats);
- *   2. per speck: x, y, radius (3 floats), specks first;
- *   3. per fiber: x, y, angle, length, bend (5 floats).
- * Counts scale with wPx * hPx / (1024 * 768) and positions scale with the canvas, so the first N
- * specks and fibers sit at the same relative places at every export scale. tintCanvas draws no
- * randomness.
+ * RNG streams: three siblings, so no consumer's start position depends on another's count or
+ * table size:
+ *   fork(seed, 'ink', 'parchment')            makeValueNoise2 tables (one 256-entry shuffle + 256 floats);
+ *   fork(seed, 'ink', 'parchment', 'specks')  per speck: x, y, radius (3 floats);
+ *   fork(seed, 'ink', 'parchment', 'fibers')  per fiber: x, y, angle, length, bend (5 floats).
+ * Counts are constant per logical frame (~400 specks and ~150 fibers for a 1024x768 frame at every
+ * scale and dpr); positions are float(0, wPx) / float(0, hPx) and sizes are multiplied by
+ * k = wPx / 1024, so every speck and fiber sits at the same relative place at the same logical
+ * size at every export scale. tintCanvas draws no randomness.
  *
  * Inputs:  parchmentCanvas: seed and the device-pixel size (the painter passes W * scale, H * scale).
  *          tintCanvas: the World (mesh, geo.r_water, geo.r_biome, params.width/height) and the same
@@ -41,7 +47,11 @@ const INK = '#2b2318';
 const TWO_PI = Math.PI * 2;
 
 const LRU_CAP = 4;
-/** Reference output size: densities and the grain wavelength are specified at 1x of this. */
+/** Parchment sheets above this many RGBA bytes are built and returned but never cached: 8M px
+ *  covers every screen up to a dpr-3 1024x768 frame and the 1x / 2x exports, while the 4x export
+ *  (4096 x 3072 x 4 = 48 MiB) stays transient (ARCHITECTURE.md section 3, Memory). */
+const PARCHMENT_CACHE_MAX_BYTES = 32 << 20;
+/** Reference logical frame: counts and the grain wavelength are specified for this frame at 1x. */
 const REF_W = 1024;
 const REF_H = 768;
 /** Grain and tint are rasterised at 1 / this of the output size. */
@@ -53,15 +63,19 @@ const FIBERS_AT_1X = 150;
 
 // ---------------------------------------------------------------- caches
 
-interface TintEntry { world: World; canvas: HTMLCanvasElement; }
-
 const parchmentCache = new Map<string, HTMLCanvasElement>();
-const tintCache = new Map<string, TintEntry>();
+/** Tint sheets per World object, keyed by size inside. A WeakMap so a World the app has moved on
+ *  from is collectable together with its sheets. */
+const tintCache = new WeakMap<World, Map<string, HTMLCanvasElement>>();
 /** Shared cellPolygon scratch: 32 corners is always enough for an interior cell. */
 const POLY = new Float32Array(64);
 
+function sizeKey(wPx: number, hPx: number): string {
+  return wPx + 'x' + hPx;
+}
+
 function cacheKey(seed: string, wPx: number, hPx: number): string {
-  return seed + 'x' + wPx + 'x' + hPx;
+  return seed + 'x' + sizeKey(wPx, hPx);
 }
 
 /** Map-backed LRU: a hit is re-inserted so insertion order is recency order. */
@@ -95,7 +109,8 @@ function makeCanvas(w: number, h: number): { canvas: HTMLCanvasElement; ctx: Can
 
 // ---------------------------------------------------------------- layer 1: parchment
 
-/** Cached wPx x hPx device-pixel parchment sheet for this seed. */
+/** wPx x hPx device-pixel parchment sheet for this seed; cached unless it is larger than
+ *  PARCHMENT_CACHE_MAX_BYTES (the 4x export). */
 export function parchmentCanvas(seed: string, wPx: number, hPx: number): HTMLCanvasElement {
   const w = Math.max(1, Math.round(wPx));
   const h = Math.max(1, Math.round(hPx));
@@ -103,7 +118,11 @@ export function parchmentCanvas(seed: string, wPx: number, hPx: number): HTMLCan
   const hit = lruGet(parchmentCache, key);
   if (hit !== undefined) return hit;
 
-  const rng = fork(seed, 'ink', 'parchment');
+  // three sibling streams: the noise tables, the specks and the fibers each start at position 0
+  // of their own stream, so the first speck and the first fiber are the same draws at every size
+  const grainRng = fork(seed, 'ink', 'parchment');
+  const speckRng = fork(seed, 'ink', 'parchment', 'specks');
+  const fiberRng = fork(seed, 'ink', 'parchment', 'fibers');
   // device px per 1x px: keeps the grain wavelength, speck size and fiber length constant in mm
   const k = w / REF_W;
   const { canvas, ctx } = makeCanvas(w, h);
@@ -114,7 +133,7 @@ export function parchmentCanvas(seed: string, wPx: number, hPx: number): HTMLCan
 
   // 2. value-noise grain at 1/4 resolution, multiplied in. The lattice spacing is the wavelength;
   //    three octaves at 1x / 2x / 4x frequency with offsets so their lattices do not line up.
-  const noise = makeValueNoise2(rng);
+  const noise = makeValueNoise2(grainRng);
   const gw = Math.max(1, Math.ceil(w / GRAIN_DIV));
   const gh = Math.max(1, Math.ceil(h / GRAIN_DIV));
   const grain = makeCanvas(gw, gh);
@@ -155,17 +174,20 @@ export function parchmentCanvas(seed: string, wPx: number, hPx: number): HTMLCan
   ctx.fillStyle = vignette;
   ctx.fillRect(0, 0, w, h);
 
-  // 4. specks: one path of tiny discs, filled once
-  const density = (w * h) / (REF_W * REF_H);
+  // 4. specks: one path of tiny discs, filled once. The count is per LOGICAL frame (logical area
+  //    (w / k) x (h / k) over the reference frame: 1 for a 1024x768 frame at every scale and dpr)
+  //    while positions span the canvas and sizes are multiplied by k, so a 4x export carries the
+  //    same ~400 specks and ~150 fibers as the screen, only crisper, not 16x as many.
+  const density = ((w / k) * (h / k)) / (REF_W * REF_H);
   const nSpecks = Math.round(SPECKS_AT_1X * density);
   ctx.save();
   ctx.fillStyle = INK;
   ctx.globalAlpha = 0.25;
   ctx.beginPath();
   for (let s = 0; s < nSpecks; s++) {
-    const x = rng.float(0, w);
-    const y = rng.float(0, h);
-    const r = rng.float(0.5, 1.5) * k;
+    const x = speckRng.float(0, w);
+    const y = speckRng.float(0, h);
+    const r = speckRng.float(0.5, 1.5) * k;
     ctx.moveTo(x + r, y);
     ctx.arc(x, y, r, 0, TWO_PI);
   }
@@ -179,11 +201,11 @@ export function parchmentCanvas(seed: string, wPx: number, hPx: number): HTMLCan
   ctx.lineCap = 'round';
   ctx.beginPath();
   for (let f = 0; f < nFibers; f++) {
-    const x0 = rng.float(0, w);
-    const y0 = rng.float(0, h);
-    const a = rng.float(0, TWO_PI);
-    const len = rng.float(20, 60) * k;
-    const bend = rng.float(-0.12, 0.12) * len;
+    const x0 = fiberRng.float(0, w);
+    const y0 = fiberRng.float(0, h);
+    const a = fiberRng.float(0, TWO_PI);
+    const len = fiberRng.float(20, 60) * k;
+    const bend = fiberRng.float(-0.12, 0.12) * len;
     const dx = Math.cos(a);
     const dy = Math.sin(a);
     const x1 = x0 + dx * len;
@@ -194,21 +216,26 @@ export function parchmentCanvas(seed: string, wPx: number, hPx: number): HTMLCan
   ctx.stroke();
   ctx.restore();
 
-  lruSet(parchmentCache, key, canvas);
+  // an export-size sheet is transient: caching it would pin ~48 MiB per seed and, on a page with a
+  // small canvas budget (iOS Safari), starve later getContext('2d') calls
+  if (w * h * 4 <= PARCHMENT_CACHE_MAX_BYTES) lruSet(parchmentCache, key, canvas);
   return canvas;
 }
 
 // ---------------------------------------------------------------- layer 4: biome tint
 
-/** Cached (wPx/4) x (hPx/4) blurred biome tint for this world. The cache key is the seed and size;
- *  the entry also remembers the World object and is rebuilt if a different World (same seed,
- *  different params) comes in. */
+/** Cached (wPx/4) x (hPx/4) blurred biome tint for this world. The cache is keyed by the World
+ *  object itself (a WeakMap, so the entry is collected with the World) and the size inside it, so
+ *  a different World with the same seed (other params) never shares or evicts an entry. */
 export function tintCanvas(world: World, wPx: number, hPx: number): HTMLCanvasElement {
   const w = Math.max(1, Math.round(wPx));
   const h = Math.max(1, Math.round(hPx));
-  const key = cacheKey(world.seed, w, h);
-  const hit = lruGet(tintCache, key);
-  if (hit !== undefined && hit.world === world) return hit.canvas;
+  const key = sizeKey(w, h);
+  let sizes = tintCache.get(world);
+  if (sizes !== undefined) {
+    const hit = lruGet(sizes, key);
+    if (hit !== undefined) return hit;
+  }
 
   const qw = Math.max(1, Math.round(w / TINT_DIV));
   const qh = Math.max(1, Math.round(h / TINT_DIV));
@@ -251,6 +278,10 @@ export function tintCanvas(world: World, wPx: number, hPx: number): HTMLCanvasEl
   if ('filter' in bctx) bctx.filter = 'blur(2px)';
   bctx.drawImage(flat.canvas, 0, 0);
 
-  lruSet(tintCache, key, { world, canvas: blurred.canvas });
+  if (sizes === undefined) {
+    sizes = new Map<string, HTMLCanvasElement>();
+    tintCache.set(world, sizes);
+  }
+  lruSet(sizes, key, blurred.canvas);
   return blurred.canvas;
 }

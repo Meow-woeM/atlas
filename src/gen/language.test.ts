@@ -1,13 +1,17 @@
 /**
  * gen/language.test.ts — Stage 12 (Names): tests for the O'Leary-style language generator.
  * No mesh is needed: makeLanguage and makeWord depend only on an Rng, so each test seeds its own
- * makeRng('<label>') the way names.ts forks per culture / per entity.
- * Inputs: src/gen/language.ts. Outputs: pass/fail plus a printed distinct-word count and timing.
+ * makeRng('<label>') the way names.ts forks per culture / per entity. The one exception is the ICU
+ * guard, which runs generate('atlas', { cellSpacing: 12 }) twice, once with String.prototype.normalize
+ * stubbed to the identity, to pin that stage 12 depends on the seed alone.
+ * Inputs: src/gen/language.ts (and gen/world.ts for the ICU guard). Outputs: pass/fail plus a printed
+ * distinct-word count and timing.
  */
 import { describe, it, expect } from 'vitest';
 import { makeRng } from '../core/rng';
-import type { Language, MorphemeKind } from '../core/types';
-import { makeLanguage, makeWord } from './language';
+import type { Language, MorphemeKind, World } from '../core/types';
+import { ENDS_WITH_VOWEL, makeLanguage, makeWord } from './language';
+import { generate } from './world';
 
 /** The syllable-template table from the task spec (section 5, stage 12); 'VC' appears twice there. */
 const STRUCTURES: readonly string[] = [
@@ -34,6 +38,27 @@ function usesMorpheme(lang: Language, word: string, kind: MorphemeKind): boolean
   if (lang.joiner === '') return list.some((m) => lower.startsWith(m) || lower.endsWith(m));
   const parts = lower.split(lang.joiner);
   return parts.some((p) => list.includes(p));
+}
+
+/** Every name assignNames writes, in entity order, so two worlds can be compared name for name. */
+function allNames(w: World): string[] {
+  return [
+    ...w.politics.cultures.map((c) => c.name), ...w.settlements.map((s) => s.name),
+    ...w.politics.nations.map((n) => n.name), ...w.provinces.map((p) => p.name),
+    ...w.features.rivers.map((r) => r.name), ...w.features.lakes.map((l) => l.name),
+    ...w.features.seas.map((s) => s.name), ...w.features.ranges.map((r) => r.name),
+  ];
+}
+
+/** Runs fn with String.prototype.normalize stubbed to the identity, as on a V8 built without ICU. */
+function withoutNormalize<T>(fn: () => T): T {
+  const orig = String.prototype.normalize;
+  String.prototype.normalize = function (this: string): string { return String(this); };
+  try {
+    return fn();
+  } finally {
+    String.prototype.normalize = orig;
+  }
 }
 
 /** Built once and reused: ten languages from ten culture-style forks. */
@@ -174,5 +199,51 @@ describe('makeWord', () => {
     console.log(`8 makeLanguage: ${(t1 - t0).toFixed(2)} ms; 500 makeWord: ${(t2 - t1).toFixed(2)} ms (${sink} chars)`);
     expect(sink).toBeGreaterThan(0);
     expect(t2 - t0).toBeLessThan(50);
+  });
+});
+
+describe('vowel table (no ICU dependence)', () => {
+  it('ENDS_WITH_VOWEL agrees with NFD decomposition on every letter the orthographies can emit', () => {
+    // Every letter 400 languages spell: all 7 vowel orthographies x every long vowel, all 7 consonant
+    // orthographies and DEFAULT_ORTHO appear many times over (the rarest, a long O, is 1 in 56 languages).
+    const letters = new Set<string>();
+    for (let i = 0; i < 400; i++) {
+      for (const v of Object.values(makeLanguage(makeRng('ortho-' + i)).ortho)) for (const ch of v) letters.add(ch);
+    }
+    for (const ch of 'áéíóúäëïöüâêîôûāēīōūàèìòù') expect(letters.has(ch), `sample never spelled ${ch}`).toBe(true);
+    for (const ch of letters) {
+      expect(ENDS_WITH_VOWEL.test(ch), `${ch} U+${ch.codePointAt(0)!.toString(16)}`).toBe(/[aeiou]/i.test(ch.normalize('NFD')));
+    }
+    // ... and nothing in the table that NFD would not call a vowel (ASCII, Latin-1, Latin Extended-A/B).
+    for (let cp = 0; cp < 0x250; cp++) {
+      const ch = String.fromCodePoint(cp);
+      if (ENDS_WITH_VOWEL.test(ch)) expect(/[aeiou]/i.test(ch.normalize('NFD')), ch).toBe(true);
+    }
+    expect(ENDS_WITH_VOWEL.test('Kalá')).toBe(true);
+    expect(ENDS_WITH_VOWEL.test('Kalaš')).toBe(false);
+    expect(ENDS_WITH_VOWEL.test('')).toBe(false);
+  });
+
+  it('makes identical languages and words when String.prototype.normalize is the identity', () => {
+    const run = (): string[] => {
+      const out: string[] = [];
+      for (let i = 0; i < 30; i++) {
+        const lang = makeLanguage(makeRng('icu-' + i));
+        out.push(JSON.stringify(lang));
+        for (let j = 0; j < 60; j++) {
+          out.push(makeWord(lang, makeRng(`icu-${i}-${j}`), j % 4 === 0 ? undefined : KINDS[j % KINDS.length]));
+        }
+      }
+      return out;
+    };
+    const before = run();
+    const after = withoutNormalize(run);
+    expect(after).toEqual(before);
+  });
+
+  it('names a whole world identically when String.prototype.normalize is the identity', () => {
+    const before = allNames(generate('atlas', { cellSpacing: 12 }));
+    const after = withoutNormalize(() => allNames(generate('atlas', { cellSpacing: 12 })));
+    expect(after).toEqual(before);
   });
 });

@@ -39,7 +39,7 @@
  */
 
 import type {
-  LayerToggles, Mesh, Polyline, PoliticalView, RenderOptions, World,
+  LayerToggles, Polyline, PoliticalView, RenderOptions, World,
 } from '../core/types';
 import { BIOMES } from '../core/types';
 import { fork } from '../core/rng';
@@ -174,16 +174,6 @@ function polylinePath(pl: Polyline): Path2D {
   const path = new Path2D();
   addPolyline(path, pl);
   return path;
-}
-
-/** Appends the closed polygon of cell r to path. Returns false for degenerate cells. */
-function addCell(path: Path2D, mesh: Mesh, r: number, poly: Float32Array): boolean {
-  const n = cellPolygon(mesh, r, poly);
-  if (n < 3) return false;
-  path.moveTo(poly[0], poly[1]);
-  for (let i = 1; i < n; i++) path.lineTo(poly[2 * i], poly[2 * i + 1]);
-  path.closePath();
-  return true;
 }
 
 /** Cell position = mean of the cellPolygon corners, into p.cx/p.cy; p.poly holds the corners.
@@ -639,42 +629,50 @@ function drawCoast(p: Paint): void {
 
 // ---------------------------------------------------------------- 10 borders and provinces
 
-function drawBorders(p: Paint): void {
-  const { ctx, world, view } = p;
-  const mesh = world.mesh;
-  const nations = world.politics.nations;
-  const r_nation = world.politics.r_nation;
+/**
+ * Per-view glow paths for layer 10, one Path2D per nation, built once per PoliticalView and
+ * memoized on the view object (6.2: "built once per view"). Nation n's path is its own border
+ * loops from the view — the only ownership the renderer reads (section 10); world.politics.r_nation
+ * is never touched — so the same path is both the glow stroke and its clip: under 'nonzero' the
+ * loops of n's components all wind the same way (n is on every loop's left, the borderNation
+ * promise) and the loop round an enclave winds the other way, which nonzero excludes.
+ */
+const nationGlowCache = new WeakMap<PoliticalView, (Path2D | null)[]>();
+
+function nationGlowPaths(view: PoliticalView, numNations: number): (Path2D | null)[] {
+  const cached = nationGlowCache.get(view);
+  if (cached !== undefined && cached.length === numNations) return cached;
+  const paths: (Path2D | null)[] = new Array(numNations).fill(null);
   const borders = view.borders;
   const borderNation = view.borderNation;
-  if (borders.length === 0) return;
-
-  // One Path2D per nation from its cells (single pass over the cells; nothing is cached).
-  const nationPaths: (Path2D | null)[] = new Array(nations.length).fill(null);
-  for (let r = mesh.numBoundaryRegions; r < mesh.numRegions; r++) {
-    const n = r_nation[r];
-    if (n < 0 || n >= nations.length) continue;
-    let path = nationPaths[n];
+  for (let b = 0; b < borders.length && b < borderNation.length; b++) {
+    const n = borderNation[b];
+    if (n < 0 || n >= numNations) continue;
+    let path = paths[n];
     if (path === null) {
       path = new Path2D();
-      nationPaths[n] = path;
+      paths[n] = path;
     }
-    addCell(path, mesh, r, p.poly);
+    addPolyline(path, borders[b]);
   }
+  nationGlowCache.set(view, paths);
+  return paths;
+}
 
+function drawBorders(p: Paint): void {
+  const { ctx, view } = p;
+  const nations = p.world.politics.nations;
+  const borders = view.borders;
+  if (borders.length === 0) return;
+
+  const glows = nationGlowPaths(view, nations.length);
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
-  for (let n = 0; n < nations.length; n++) {
-    const clipPath = nationPaths[n];
-    if (clipPath === null) continue;
-    let glow: Path2D | null = null;
-    for (let b = 0; b < borders.length && b < borderNation.length; b++) {
-      if (borderNation[b] !== n) continue;
-      if (glow === null) glow = new Path2D();
-      addPolyline(glow, borders[b]);
-    }
+  for (let n = 0; n < glows.length; n++) {
+    const glow = glows[n];
     if (glow === null) continue;
     ctx.save();
-    ctx.clip(clipPath);
+    ctx.clip(glow, 'nonzero');
     ctx.strokeStyle = nations[n].color;
     ctx.globalAlpha = 0.32;
     ctx.lineWidth = 10;
@@ -735,8 +733,9 @@ function drawSettlements(p: Paint): void {
   for (let i = 0; i < settlements.length; i++) {
     const s = settlements[i];
     if (s.died !== -1) continue;
-    if (cellCenter(p, s.r) === 0) continue;
-    const x = p.cx, y = p.cy;
+    // At the cell point (mesh.r_x/r_y), where labels.ts anchors the icon and anchor boxes; the
+    // polygon corner mean used for glyph scatter can sit several px away at coarse cellSpacing.
+    const x = world.mesh.r_x[s.r], y = world.mesh.r_y[s.r];
     ctx.lineWidth = 0.9;
     drawGlyphAt(ctx, settlementPath(s.kind, isCapital[i] === 1), x, y, true, true);
     if (s.port) {
