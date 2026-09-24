@@ -107,7 +107,7 @@ export interface WorldParams {
   landFraction: number;       // 0.42; sea level = matching quantile of raw height
   continents: 1 | 2 | 3;
   windDir: WindDir | 'random';
-  lakesMax: number;           // 8
+  lakesMax: number;           // 32 (8 until 2026-09-23, when stage 4 began carving lake basins)
   riverPercentile: number;    // 0.94
   provinceSpacing: number;    // Poisson radius for province sites in logical px (48 -> ~140 provinces)
   settlementsMax: number;     // 40
@@ -118,7 +118,7 @@ export interface WorldParams {
 export const DEFAULT_PARAMS: WorldParams = {
   version: ATLAS_VERSION, width: 1024, height: 768, cellSpacing: 8, rasterScale: 0.5,
   frame: { lon0: -20, lon1: 20, lat0: 58, lat1: 28 },
-  landFraction: 0.42, continents: 2, windDir: 'random', lakesMax: 8, riverPercentile: 0.94,
+  landFraction: 0.42, continents: 2, windDir: 'random', lakesMax: 32, riverPercentile: 0.94,
   provinceSpacing: 48, settlementsMax: 40, nationsMax: 8, nations: 'auto',
 };
 
@@ -430,10 +430,12 @@ Two things about the continental cores are load-bearing, both learned by measuri
 1. `r_lat`, `r_lon` from the frame (`cellLatLon`), `cellUnitVector(r)` from lat/lon.
 2. **Noise on the sphere** (grafted from the raster pitch): 3D simplex with a permutation table shuffled by the stage RNG, 6-octave fBm (lacunarity 2, gain 0.5), frequency chosen so the base wavelength is ~1/3 of the frame's width, domain-warped once: `p' = p + 0.08 · (fbm(p+o₁), fbm(p+o₂), fbm(p+o₃))`. ~18 evaluations x 10k cells ≈ 7 ms. A planet mode later samples the same field at the same frequency.
 3. **Continent mask**: `params.continents` Gaussian blobs (centers/radii from the RNG, restricted to the inner 70% of the canvas) max-combined, times an edge falloff so ≥ 40 px of ocean margin always exists. `raw = 0.65·fbm + 0.35·mask`.
+   **Edge falloff, revised 2026-09-23.** A fixed margin cut every coast that reached it into a line parallel to the frame. The margin now wanders along the frame: per cell it is `min + (max − min) × w`, where `w` is a 3-octave read of the same simplex at 0.9× the terrain frequency (offset by a constant, no RNG draw), min-max normalised over the interior; the falloff is `smoothstep((de − margin) / ramp)`. `edgeMargins(params)` scales all four lengths with the short side of the map (16 / 115 / 80 / 24 px at 1024×768, so a 400×300 test world keeps the proportions): `min` is the sliver of sea always left against the ring, `max` how deep a bay can bite, `ramp` the falloff width, and `sea` how close to the frame water counts as the sea beyond the map — such water seeds the ocean flood along with the ring (step 5), since a headland that reaches the margin would otherwise wall a strip of it off and turn it into a lake the length of the frame.
 4. **Sea level by quantile** over interior cells: `sea = quantile(raw, 1 − landFraction)`. `r_water = raw < sea ? 1 : 0`; boundary ring forced to water.
 5. **Ocean flood fill** from the ring across water cells: reached = ocean (1); unreached water = lake candidate (temporarily 2; hydrology decides).
 6. **Coast hops**: multi-source BFS from ocean cells → `r_coastHops`.
 7. **Reshape** (mapgen2's coast-distance trick): rank land cells by `raw`, `rankNorm ∈ [0,1]`; `r_elevation = 0.55·rankNorm^1.5 + 0.45·(hops/maxHops)^0.8`; water cells get `−(sea − raw)/sea` clamped to `[-1, 0)`.
+   **7b. Lake basins (2026-09-23).** The reshape makes height climb with coast distance, which erases almost every natural pit, so stage 7's priority flood found lakes only where the basement dipped below sea level inland — 0 to 6 per world. Now one basin per 110 land cells is carved at the most prominent local minima of the basement noise on inland land (≥ 3 coast hops, ranked by the noise dip weighted `0.5 + elevation`, index tie-break, no RNG): the seed and its neighbours (every third basin: two rings) are lowered to 0.035 below the lowest of them and the ring beyond to half that, so the spill point lies on the shell's outer corners and every corner of the inner cells is flooded. Stage 7 then makes each pit a lake of 5–30 cells; `lakesMax` rose 8 → 32. Measured over 16 seeds: 9–16 lakes per world, inland water 1–4% of cells, rivers now end at lakes and restart below them.
 8. `r_slope[r] = max |r_elevation[r] − r_elevation[nbr]|`.
 
 **The formation timeline (added 2026-09-18).** The three fields raw height mixes — basement noise, craton and uplift — do not depend on time; only how much of each is mixed in does. So `Formation` stores the three fields once and `rawAtStep` evaluates a moment in one pass over the cells, instead of storing a snapshot per step. Sea level is **absolute**: the `landFraction` quantile of raw at the LAST step, which every earlier step is measured against, and it is why the last step reproduces the world as if there were no timeline at all. Land fraction is monotonic in the step up to a hair (with plate drift a step may lose at most 0.3% of the map, and the present is above every earlier step) and lands on `params.landFraction` at the end; `elevation.test.ts` asserts both. `FORMATION_STEPS` is 96 (24 until the live scrub; finer steps make the drift smoother at the same frame rate) and `params.formationStep` selects the moment. `landMaskAtStep` is the cheap land/sea read (kept for tests and tools); the UI no longer previews with it — see the live scrub below.

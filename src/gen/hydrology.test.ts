@@ -423,9 +423,12 @@ describe('hydrology (default world, counts and budget)', () => {
     );
     expect(hydro.riverSides.length).toBeGreaterThanOrEqual(10);
     expect(hydro.riverSides.length).toBeLessThanOrEqual(150);
-    expect(longest).toBeGreaterThan(30);
+    expect(longest).toBeGreaterThan(20);   // rivers end at lakes and restart below them, so the longest single river got shorter once stage 4 carved basins (2026-09-23)
     expect(hydro.lakeCells.length).toBeGreaterThanOrEqual(1);
-    expect(hydro.revertedCells.length).toBeGreaterThanOrEqual(1);
+    // With lakesMax 32 nothing may need reverting on this world; the revert path is exercised by
+    // capping the count (the lakesMax test below covers the same path in detail).
+    const capped = computeHydrology(w.mesh, { ...w.params, lakesMax: 1 }, w.r_elevation, w.r_water, w.r_moisture);
+    expect(capped.revertedCells.length).toBeGreaterThanOrEqual(1);
   });
 
   it('stays within a loose multiple of the 15 ms budget in node', () => {
