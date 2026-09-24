@@ -43,6 +43,8 @@ Example: `https://<host>/atlas/#seed=amberfell&land=0.45&wind=2&cells=8`
 - **The world is named in its own right.** The cartouche title is a fresh word in the dominant nation's tongue, never a nation's, culture's or town's name.
 - **The seed is a URL, not map furniture.** The cartouche no longer prints it.
 - **Export sits at the bottom of the sidebar**, pinned there while the rest scrolls, and the stage-timings readout is folded into a closed `Timings` disclosure that opens itself only to show an error.
+- **Lakes.** Stage 4 carves basins at the most prominent inland dips of the basement noise (one per ~110 land cells, two rings deep so the priority flood fills them), and `lakesMax` went from 8 to 32: 9–16 lakes per world instead of 0–6. Rivers end at lakes and restart below them.
+- **No more coasts squared off along the frame.** The ocean margin wanders along the border with a low-frequency noise (16–115 px at the default size), so land near the edge ends in bays and headlands; water within 24 px of the frame is the sea beyond the map and always drains to it.
 
 
 Every module in `docs/ARCHITECTURE.md` section 7 exists, the three gates are green (`npm test`: 438 tests in 27 files; `npm run typecheck`: zero errors; `npm run build`: tsc + vite, ~94 kB of JS) and the app runs in headless Chromium. Re-checked after the sampler retune on 2026-09-18: seeds `atlas`, `amberfell`, `test-1` and `zzzzzzzz` each generate and render a complete map (coast, relief, rivers, lakes, borders, settlements, labels, cartouche, compass, scale bar) with no console errors from the app, and the 2x PNG export works. Those numbers -- generate 184-333 ms wall, 1x screen render 78-122 ms, 2x export 527 ms -- came from a sandboxed Linux container, so they are slower than the 2026-09-17 laptop run (170-195 ms / 65-105 ms / ~440 ms) and are not comparable to it; the node measurements below are the ones to track. That sandbox cannot reach the webfont CDN, so the run also exercised the fallback-serif path rather than IM Fell English. The deployed site is https://meow-woem.github.io/atlas/ (GitHub Pages, built by `.github/workflows/pages.yml` on every push to `main`).
@@ -60,7 +62,7 @@ Every module in `docs/ARCHITECTURE.md` section 7 exists, the three gates are gre
 
 ### Measured in node at the default parameters (seeds atlas, amberfell, test-1, a, zzzzzzzz)
 
-~8,700 cells, land fraction 0.417-0.420, 20-27 rivers, 0-6 lakes, 98-123 provinces, 38-39 settlements (12-24 of them ports), 7-8 nations and 7-8 cultures, 152-175 year-0 events, every name filled, titles such as "The Puserb Lands" and "The Realms of Muqyut". `generate` takes 125-245 ms warm in node (69-97 ms at `cells=12`). No stage is more than ~1.5x its section 5 budget any more: the worst are `elevation` (26 ms against 25), `features` (23 ms against 15) and `distance` (22 ms against 15).
+~8,700 cells, land fraction 0.417-0.420, 20-30 rivers, 9-16 lakes, 98-123 provinces, 38-39 settlements (12-24 of them ports), 7-8 nations and 7-8 cultures, 152-175 year-0 events, every name filled, titles such as "The Puserb Lands" and "The Realms of Muqyut". `generate` takes 125-245 ms warm in node (69-97 ms at `cells=12`). No stage is more than ~1.5x its section 5 budget any more: the worst are `elevation` (26 ms against 25), `features` (23 ms against 15) and `distance` (22 ms against 15).
 
 ### Known deviations from the architecture doc
 

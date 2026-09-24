@@ -90,8 +90,43 @@ export interface ElevationResult {
   formation: Formation;
 }
 
-/** Ocean margin guaranteed inside the rectangle, logical px. */
-const MARGIN = 40;
+/**
+ * The ocean margin inside the rectangle varies along the frame: a fixed margin cut every coast
+ * that reached it into a line parallel to the frame. Per cell the margin is min + (max - min) x a
+ * low-frequency noise of the position, so land near the frame ends in bays and headlands, never in
+ * a straight run; the falloff ramps from 0 at the margin to 1 over `ramp` px beyond it. All four
+ * lengths scale with the short side of the map (the 1024x768 defaults give 16 / 115 / 80 / 24 px)
+ * so a 400x300 test world keeps the same proportions instead of drowning in margin. `sea` is how
+ * close to the frame water counts as the sea beyond the map (see elevationAtStep step 5), and
+ * `min` is the sliver of sea that is always there against the boundary ring.
+ */
+export function edgeMargins(params: WorldParams): { min: number; max: number; ramp: number; sea: number } {
+  const m = Math.min(params.width, params.height);
+  const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v);
+  return {
+    min: clamp(0.021 * m, 8, 16),
+    max: clamp(0.15 * m, 30, 115),
+    ramp: clamp(0.105 * m, 30, 80),
+    sea: clamp(0.031 * m, 10, 24),
+  };
+}
+/** The margin noise samples the same simplex at this multiple of the terrain frequency. */
+const MARGIN_FREQ = 0.9;
+/** Offset added to the warp offsets for the margin noise (no extra RNG draw). */
+const MARGIN_SHIFT = 41.7;
+/**
+ * Lake basins (2026-09-23): the reshape below makes height climb with the coast distance, which
+ * erases almost every natural pit, so the priority flood of stage 7 found lakes only where the
+ * basement noise happened to dip below sea level inland — a handful per world at best. This pass
+ * carves basins at the most prominent local minima of the basement noise on inland land: one
+ * basin per BASIN_LAND_CELLS land cells, the seed cell and its neighbours lowered to
+ * BASIN_DEPTH below the lowest of them, at least BASIN_MIN_HOPS from the ocean, ranked by the
+ * noise dip (mean neighbour noise - own) weighted toward high ground. Stage 7 floods each pit and
+ * makes it a lake if the flooded cells number at least its minimum. Deterministic, no RNG.
+ */
+const BASIN_LAND_CELLS = 110;
+const BASIN_DEPTH = 0.035;
+const BASIN_MIN_HOPS = 3;
 /** Mixing weights for raw height. Absolute scale is irrelevant (sea level is a quantile); what
  *  matters is their ratio, and that the ramps below make the total grow with time. */
 const W_NOISE = 0.42;
@@ -226,10 +261,25 @@ export function buildFormation(mesh: Mesh, params: WorldParams, rng: Rng, tec: T
   }
   const fScale = fMax > fMin ? 1 / (fMax - fMin) : 0;
 
-  // ---- 3. the formation fields: craton and uplift from the plates, plus the edge falloff
+  // ---- 3. the formation fields: craton and uplift from the plates, plus the edge falloff. The
+  // margin the falloff starts at wanders along the frame with a second, lower-frequency read of
+  // the same noise (no RNG draw), min-max normalised like the basement.
   const { r_px, r_py } = cellCentroids(mesh);
-  const ramp = Math.max(40, Math.min(100, 0.12 * Math.min(W, H)));
-  const invRamp = 1 / ramp;
+  const edge = edgeMargins(params);
+  const invRamp = 1 / edge.ramp;
+  const wob = new Float32Array(n);
+  let wMin = Infinity, wMax = -Infinity;
+  const mf = freq * MARGIN_FREQ;
+  for (let r = 0; r < n; r++) {
+    cellUnitVector(mesh, params, r, v);
+    const w = fbm3(simplex, v[0] * mf + off[0] + MARGIN_SHIFT, v[1] * mf + off[1] + MARGIN_SHIFT, v[2] * mf + off[2] + MARGIN_SHIFT, 3, 2, 0.5);
+    wob[r] = w;
+    if (r >= nb) {
+      if (w < wMin) wMin = w;
+      if (w > wMax) wMax = w;
+    }
+  }
+  const wScale = wMax > wMin ? 1 / (wMax - wMin) : 0;
 
   const r_noise = new Float32Array(n);
   const r_falloff = new Float32Array(n);
@@ -237,7 +287,8 @@ export function buildFormation(mesh: Mesh, params: WorldParams, rng: Rng, tec: T
   for (let r = 0; r < n; r++) {
     r_noise[r] = (raw[r] - fMin) * fScale;
     const de = Math.min(r_px[r], W - r_px[r], r_py[r], H - r_py[r]);
-    r_falloff[r] = smoothstep((de - MARGIN) * invRamp);
+    const margin = edge.min + (edge.max - edge.min) * ((wob[r] - wMin) * wScale);
+    r_falloff[r] = smoothstep((de - margin) * invRamp);
     const stress = tec.r_stress[r];
     const signed = stress > 0 ? stress : RIFT_W * stress;
     r_uplift[r] = signed * (0.5 + 0.5 * tec.r_craton[r]);
@@ -288,13 +339,26 @@ export function elevationAtStep(mesh: Mesh, params: WorldParams, formation: Form
   const raw = rawAtStep(formation, step);
   const r_water = new Uint8Array(n);
   for (let r = 0; r < n; r++) r_water[r] = r < nb || raw[r] < sea ? 1 : 0;
-  // ---- 5. ocean flood fill from the ring across water cells
+  // ---- 5. ocean flood fill from the ring, and from the water along the frame, across water cells
   const queue = new Int32Array(n);
   const seen = new Uint8Array(n);
   let head = 0, tail = 0;
   for (let r = 0; r < nb; r++) {
     seen[r] = 1;
     queue[tail++] = r;
+  }
+  {
+    const { r_px, r_py } = formation.lookup;
+    const W = params.width, H = params.height;
+    const seaPx = edgeMargins(params).sea;
+    for (let r = nb; r < n; r++) {
+      if (r_water[r] === 0) continue;
+      const de = Math.min(r_px[r], W - r_px[r], r_py[r], H - r_py[r]);
+      if (de < seaPx) {
+        seen[r] = 1;
+        queue[tail++] = r;
+      }
+    }
   }
   while (head < tail) {
     const r = queue[head++];
@@ -359,6 +423,69 @@ export function elevationAtStep(mesh: Mesh, params: WorldParams, formation: Form
     if (e < -1) e = -1;
     if (e > WATER_EPS) e = WATER_EPS;
     r_elevation[r] = e;
+  }
+
+  // ---- 7b. lake basins at the most prominent inland dips of the basement noise
+  {
+    const { r_noise } = formation;
+    const prominence = new Float32Array(n);
+    let numCand = 0;
+    for (let r = nb; r < n; r++) {
+      if (r_water[r] !== 0 || r_coastHops[r] < BASIN_MIN_HOPS) continue;
+      r_circulate_r(mesh, r, nbrs);
+      let sum = 0, count = 0, minimum = true;
+      for (let i = 0; i < nbrs.length; i++) {
+        const q = nbrs[i];
+        if (r_water[q] !== 0 || r_coastHops[q] < BASIN_MIN_HOPS) { minimum = false; break; }
+        if (r_noise[q] <= r_noise[r]) { minimum = false; break; }
+        sum += r_noise[q];
+        count++;
+      }
+      if (!minimum || count === 0) continue;
+      prominence[r] = (sum / count - r_noise[r]) * (0.5 + r_elevation[r]);
+      numCand++;
+    }
+    const cand = new Int32Array(numCand);
+    for (let r = nb, k = 0; r < n; r++) if (prominence[r] > 0) cand[k++] = r;
+    cand.sort((a, b) => prominence[b] - prominence[a] || a - b);
+    const basins = Math.min(numCand, Math.floor(numLand / BASIN_LAND_CELLS));
+    const carved = new Uint8Array(n);
+    const inner: number[] = [];
+    const shell: number[] = [];
+    const ring: number[] = [];
+    for (let k = 0; k < basins; k++) {
+      const seed = cand[k];
+      if (carved[seed] === 1) continue;
+      // The basin is the seed, its neighbours, and for every third basin the ring beyond; the
+      // shell is the ring around that. The shell is carved half as deep, so the spill point lies
+      // on the shell's outer corners and every corner of the inner cells is under water: stage 7
+      // then floods the whole inner set, which is what makes it a lake and not a one-cell pond.
+      inner.length = 0;
+      shell.length = 0;
+      inner.push(seed);
+      const rings = k % 3 === 0 ? 2 : 1;
+      let frontier: number[] = [seed];
+      for (let ringNo = 0; ringNo <= rings; ringNo++) {
+        ring.length = 0;
+        for (let f = 0; f < frontier.length; f++) {
+          r_circulate_r(mesh, frontier[f], nbrs);
+          for (let i = 0; i < nbrs.length; i++) {
+            const q = nbrs[i];
+            if (q < nb || r_water[q] !== 0 || carved[q] === 1 || inner.includes(q) || shell.includes(q) || ring.includes(q)) continue;
+            ring.push(q);
+          }
+        }
+        if (ringNo < rings) inner.push(...ring); else shell.push(...ring);
+        frontier = ring.slice();
+      }
+      let floor = r_elevation[seed];
+      for (let i = 0; i < inner.length; i++) if (r_elevation[inner[i]] < floor) floor = r_elevation[inner[i]];
+      for (let i = 0; i < shell.length; i++) if (r_elevation[shell[i]] < floor) floor = r_elevation[shell[i]];
+      const deep = Math.max(0.001, floor - BASIN_DEPTH);           // stays land: stage 7 decides the lake
+      const half = Math.max(0.001, floor - BASIN_DEPTH * 0.5);
+      for (let i = 0; i < inner.length; i++) { r_elevation[inner[i]] = deep; carved[inner[i]] = 1; }
+      for (let i = 0; i < shell.length; i++) { r_elevation[shell[i]] = half; carved[shell[i]] = 1; }
+    }
   }
 
   // ---- 8. slope

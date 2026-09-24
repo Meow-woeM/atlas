@@ -10,7 +10,7 @@ import { DEFAULT_PARAMS, FORMATION_STEPS } from '../core/types';
 import type { Mesh, Raster, WorldParams } from '../core/types';
 import { generatePoints } from '../mesh/poisson';
 import { buildMesh, cellPolygon, r_circulate_r } from '../mesh/dualmesh';
-import { computeElevation, computeDistanceField, rawAtStep, landMaskAtStep } from './elevation';
+import { computeElevation, computeDistanceField, rawAtStep, landMaskAtStep, edgeMargins } from './elevation';
 import { computeTectonics } from './tectonics';
 import type { ElevationResult } from './elevation';
 
@@ -105,16 +105,22 @@ for (const w of worlds) {
       expect(badKind).toBe(0);
     });
 
-    it('no land cell within 40 px of the rectangle edge', () => {
+    it('no land cell within the minimum margin of the rectangle edge, and land does come closer than the maximum', () => {
+      // The margin wanders between edgeMargins().min and .max along the frame (2026-09-23), so the
+      // old fixed 40 px guarantee became a minimum sliver plus a promise that the coast is not a
+      // straight line at one distance: somewhere land comes well inside the old margin.
       const poly = new Float32Array(64);
-      let violations = 0;
+      const edge = edgeMargins(params);
+      let violations = 0, close = 0;
       for (let r = nb; r < n; r++) {
         if (elev.r_water[r] !== 0) continue;
         const [x, y] = cellPos(mesh, r, poly);
         const de = Math.min(x, params.width - x, y, params.height - y);
-        if (de < 40) violations++;
+        if (de < edge.min) violations++;
+        if (de < edge.max * 0.6) close++;
       }
       expect(violations).toBe(0);
+      if (params.width >= 1000) expect(close).toBeGreaterThan(0);
     });
 
     it('every ocean cell is connected to the ring through ocean cells (flood-fill property)', () => {
@@ -148,7 +154,8 @@ for (const w of worlds) {
         for (const q of nbrs) if (elev.r_water[q] === 1) bad++;
       }
       expect(bad).toBe(0);
-      expect(candidates).toBeLessThan((n - nb) * 0.1);
+      // Up to 15%: since the wandering margin (2026-09-23) this seed carries a 600-cell inland sea.
+      expect(candidates).toBeLessThan((n - nb) * 0.15);
     });
 
     it('coast hops are 0 exactly on ocean cells and >= 1 elsewhere, and differ by <= 1 across a side', () => {
@@ -177,8 +184,10 @@ for (const w of worlds) {
       }
       expect(bad).toBe(0);
       // 0.55 rankNorm^1.5 + 0.45 (hops / maxHops)^0.8 reaches 1 only when the highest-raw cell is
-      // also the farthest from the coast; ~0.9 is typical.
-      expect(maxLand).toBeGreaterThan(0.8);
+      // also the farthest from the coast; ~0.9 is typical, ~0.73 when a large inland sea (which
+      // the hops ignore: they measure the OCEAN coast) pushes maxHops up, as on this seed since
+      // 2026-09-23.
+      expect(maxLand).toBeGreaterThan(0.7);
       expect(minWater).toBeLessThanOrEqual(-0.9);
     });
 
@@ -311,7 +320,7 @@ describe('determinism', () => {
         if (e.r_water[r] !== 0) continue;
         land++;
         const [x, y] = cellPos(mesh, r, poly);
-        if (Math.min(x, p.width - x, y, p.height - y) < 40) margin++;
+        if (Math.min(x, p.width - x, y, p.height - y) < edgeMargins(p).min) margin++;
       }
       expect(Math.abs(land / (mesh.numRegions - mesh.numBoundaryRegions) - p.landFraction)).toBeLessThan(0.01);
       expect(margin).toBe(0);

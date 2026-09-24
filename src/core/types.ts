@@ -29,7 +29,7 @@ export interface WorldParams {
   plates: number;             // tectonic plates (9); stage 3.5 grows them over the cell graph
   formationStep: number;      // 0..FORMATION_STEPS-1, the moment on the formation timeline
   windDir: WindDir | 'random';
-  lakesMax: number;           // 8
+  lakesMax: number;           // 32 (8 until 2026-09-23; stage 4 now carves lake basins)
   riverPercentile: number;    // 0.94
   provinceSpacing: number;    // Poisson radius for province sites in logical px (48 -> ~140 provinces)
   settlementsMax: number;     // 40
@@ -41,7 +41,7 @@ export const DEFAULT_PARAMS: WorldParams = {
   version: ATLAS_VERSION, width: 1024, height: 768, cellSpacing: 8, rasterScale: 0.5,
   frame: { lon0: -20, lon1: 20, lat0: 58, lat1: 28 },
   landFraction: 0.42, continents: 2, plates: 9, formationStep: FORMATION_STEPS - 1,
-  windDir: 'random', lakesMax: 8, riverPercentile: 0.94,
+  windDir: 'random', lakesMax: 32, riverPercentile: 0.94,
   provinceSpacing: 48, settlementsMax: 40, nationsMax: 8, nations: 'auto',
 };
 
