@@ -21,7 +21,7 @@ npm run typecheck  # tsc --noEmit
 The seed and the generation parameters live in the URL hash, so a world is shareable as a link:
 
 ```
-#seed=<string>&land=<fraction>&wind=<0-7|random>&cells=<spacing>&step=<0-23>&nations=<3-12|auto>
+#seed=<string>&land=<fraction>&wind=<0-7|random>&cells=<spacing>&step=<0-95>&nations=<3-12|auto>
 ```
 
 - `seed` is any string; the Randomize button makes an 8-letter one. Omit it and the app picks one at random.
@@ -38,11 +38,11 @@ Example: `https://<host>/atlas/#seed=amberfell&land=0.45&wind=2&cells=8`
 **2026-09-23.** Six changes from a review of the live site:
 
 - **The plates play into the formation.** The timeline used to ramp three static fields up, so every world's story was islands rising from an empty sea. Now the crust rides its plate: an earlier step reads the final crust displaced back along the plate's drift, and crust that will have been subducted by the present reads as sea floor. Converging continents close an ocean and raise their mountain belt where they meet; diverging ones split. The present day is untouched (no `ATLAS_VERSION` bump). Details under stage 4 in the architecture doc.
-- **No more blue-and-white flash while dragging the bar.** The drag preview is painted in the map's own materials (seeded parchment, ocean wash, parchment land, ink coast, frame), so settling only adds the detail.
+- **The bar scrubs the real world.** Dragging it regenerates the geography of each step every frame from the seed's prepared base (mesh, edges, plates, formation fields), so coasts move, mountains rise, rivers grow and shrink and forests shift under the pointer; borders, towns, labels and the cartouche belong to the settled world and are added when the drag ends. No silhouette, no flash.
 - **A nation count.** The `Nations` select (auto, or 3 to 12) and `&nations=` in the hash ask politics for exactly that many; capital spacing relaxes as needed and settled islands past the count are annexed by the nearest nation instead of becoming free cities.
 - **The world is named in its own right.** The cartouche title is a fresh word in the dominant nation's tongue, never a nation's, culture's or town's name.
 - **The seed is a URL, not map furniture.** The cartouche no longer prints it.
-- **Export sits at the bottom of the sidebar**, pinned there while the rest scrolls.
+- **Export sits at the bottom of the sidebar**, pinned there while the rest scrolls, and the stage-timings readout is folded into a closed `Timings` disclosure that opens itself only to show an error.
 
 
 Every module in `docs/ARCHITECTURE.md` section 7 exists, the three gates are green (`npm test`: 438 tests in 27 files; `npm run typecheck`: zero errors; `npm run build`: tsc + vite, ~94 kB of JS) and the app runs in headless Chromium. Re-checked after the sampler retune on 2026-09-18: seeds `atlas`, `amberfell`, `test-1` and `zzzzzzzz` each generate and render a complete map (coast, relief, rivers, lakes, borders, settlements, labels, cartouche, compass, scale bar) with no console errors from the app, and the 2x PNG export works. Those numbers -- generate 184-333 ms wall, 1x screen render 78-122 ms, 2x export 527 ms -- came from a sandboxed Linux container, so they are slower than the 2026-09-17 laptop run (170-195 ms / 65-105 ms / ~440 ms) and are not comparable to it; the node measurements below are the ones to track. That sandbox cannot reach the webfont CDN, so the run also exercised the fallback-serif path rather than IM Fell English. The deployed site is https://meow-woem.github.io/atlas/ (GitHub Pages, built by `.github/workflows/pages.yml` on every push to `main`).

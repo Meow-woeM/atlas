@@ -12,14 +12,14 @@
 import { describe, it, expect } from 'vitest';
 import { fork } from '../core/rng';
 import { ATLAS_VERSION, DEFAULT_PARAMS } from '../core/types';
-import type { WorldParams } from '../core/types';
+import type { World, WorldParams } from '../core/types';
 import { generatePoints } from '../mesh/poisson';
 import { buildMesh, r_circulate_r } from '../mesh/dualmesh';
 import { computeElevation, computeDistanceField } from './elevation';
 import { computeTectonics } from './tectonics';
 import { computeClimate } from './climate';
 import { computeHydrology } from './hydrology';
-import { fromWorldFile, generate, toWorldFile, withParams } from './world';
+import { baseKey, fromWorldFile, generate, generateFromBase, prepareBase, toWorldFile, withParams } from './world';
 
 const SEED = 'test-1';
 const STAGE_KEYS = [
@@ -383,5 +383,57 @@ describe('geography assembly', () => {
       if (w === 0 && (b === 0 || b === 1)) bad++;
     }
     expect(bad).toBe(0);
+  });
+});
+
+describe('generate: base and step', () => {
+  it('a world from a prepared base at step s is identical to generate(seed, { formationStep: s })', () => {
+    const base = prepareBase('base-step', { cellSpacing: 12 });
+    for (const step of [0, 9, 23]) {
+      const fromBase = generateFromBase(base, { ...base.params, formationStep: step });
+      const direct = generate('base-step', { cellSpacing: 12, formationStep: step });
+      const diff: Diff = { count: 0, first: '' };
+      const { timings: _t1, ...a } = fromBase;
+      const { timings: _t2, ...b } = direct;
+      compare(a, b, 'world@' + step, diff);
+      expect(diff.count, 'first difference at ' + diff.first).toBe(0);
+    }
+  });
+
+  it('geographyOnly matches the full world in geo and features and leaves stages 9-12 empty', () => {
+    const base = prepareBase('base-geo', { cellSpacing: 12 });
+    const p = { ...base.params, formationStep: 11 };
+    const full = generateFromBase(base, p);
+    const geo = generateFromBase(base, p, true);
+    const diff: Diff = { count: 0, first: '' };
+    compare(geo.geo, full.geo, 'geo', diff);
+    // features carry names in the full world; compare everything but the name fields
+    const stripNames = (f: World['features']): unknown => ({
+      ...f,
+      rivers: f.rivers.map(({ name: _n, ...rest }) => rest),
+      lakes: f.lakes.map(({ name: _n, ...rest }) => rest),
+      seas: f.seas.map(({ name: _n, ...rest }) => rest),
+      ranges: f.ranges.map(({ name: _n, ...rest }) => rest),
+    });
+    compare(stripNames(geo.features), stripNames(full.features), 'features', diff);
+    expect(diff.count, 'first difference at ' + diff.first).toBe(0);
+    expect(geo.provinces.length).toBe(0);
+    expect(geo.settlements.length).toBe(0);
+    expect(geo.politics.nations.length).toBe(0);
+    expect(geo.history.events.length).toBe(0);
+    expect(geo.r_province.every((v) => v === -1)).toBe(true);
+    expect(geo.politics.r_nation.length).toBe(geo.mesh.numRegions);
+    expect(Object.keys(geo.timings)).toEqual(['points', 'mesh', 'edges', 'tectonics', 'elevation', 'distance', 'climate', 'hydrology', 'biomes', 'features']);
+  });
+
+  it('refuses params that differ from the base beyond formationStep and nations, and baseKey ignores exactly those', () => {
+    const base = prepareBase('base-key', { cellSpacing: 12 });
+    expect(() => generateFromBase(base, { ...base.params, nations: 4, formationStep: 2 }, true)).not.toThrow();
+    expect(() => generateFromBase(base, { ...base.params, landFraction: 0.5 }, true)).toThrow(/differ from the base/);
+    expect(baseKey({ ...base.params, nations: 7, formationStep: 0 })).toBe(baseKey(base.params));
+    expect(baseKey({ ...base.params, cellSpacing: 8 })).not.toBe(baseKey(base.params));
+    // key order does not matter
+    const reordered = Object.fromEntries(Object.entries(base.params).reverse()) as WorldParams;
+    expect(baseKey(reordered)).toBe(baseKey(base.params));
   });
 });

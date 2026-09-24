@@ -12,6 +12,10 @@
  *          and the Tectonics of stage 3.5.
  * Outputs: ElevationResult (r_elevation, r_water, r_coastHops, r_slope, r_lat, r_lon, formation)
  *          and, from computeDistanceField, { distField, r_coastDist }.
+ * Split (2026-09-23): computeElevation = elevationAtStep(buildFormation(...), params.formationStep).
+ *          buildFormation does the RNG draws and the noise once; elevationAtStep is the per-moment
+ *          part and draws nothing, so gen/world.ts can re-run a step from a prepared base while
+ *          the scroll bar is dragged.
  *
  * THE FORMATION TIMELINE. The three fields raw height is mixed from — basement noise, continental
  * craton and tectonic uplift — do not depend on time; only how much of each is mixed in does, and
@@ -184,22 +188,16 @@ export function landMaskAtStep(
   return mask;
 }
 
-export function computeElevation(
-  mesh: Mesh, params: WorldParams, rng: Rng, tec: Tectonics,
-): ElevationResult {
+/**
+ * Steps 1-3 of stage 4: the time-independent fields. Draws the stage's RNG (permutation shuffle,
+ * warp offsets), evaluates the warped fBm once per cell, shapes craton and uplift from the plates,
+ * builds the nearest-cell grid and fixes the absolute sea level. Everything a moment on the
+ * timeline needs, so elevationAtStep can be re-run per step without touching the RNG or the noise.
+ */
+export function buildFormation(mesh: Mesh, params: WorldParams, rng: Rng, tec: Tectonics): Formation {
   const n = mesh.numRegions;
   const nb = mesh.numBoundaryRegions;
   const W = params.width, H = params.height;
-  const nbrs: number[] = [];
-
-  // ---- 1. lat / lon
-  const r_lat = new Float32Array(n);
-  const r_lon = new Float32Array(n);
-  for (let r = 0; r < n; r++) {
-    const ll = cellLatLon(mesh, params, r);
-    r_lat[r] = ll[0];
-    r_lon[r] = ll[1];
-  }
 
   // ---- 2. noise on the sphere (RNG draws 1 and 2)
   const simplex = makeSimplex3(rng);
@@ -259,16 +257,37 @@ export function computeElevation(
     lookup: buildCellLookup(mesh, LOOKUP_BUCKET * params.cellSpacing, { r_px, r_py }),
   };
 
-  // ---- 4. sea level, ABSOLUTE: the landFraction quantile at the LAST step, so every earlier step
+  // ---- 4a. sea level, ABSOLUTE: the landFraction quantile at the LAST step, so every earlier step
   // shows less land against the same sea rather than a sea that rises and falls with the land.
   const rawFinal = rawAtStep(formation, FORMATION_STEPS - 1);
   formation.seaLevel = quantile(rawFinal.subarray(nb), 1 - params.landFraction);
-  const sea = formation.seaLevel;
+  return formation;
+}
 
-  rawAtStep(formation, params.formationStep, raw);
+/**
+ * Steps 4-8 of stage 4 at one moment of the timeline: water mask, ocean flood fill, coast hops,
+ * reshape, slope — plus lat / lon (step 1), which are cheap and belong to the result. Draws no
+ * RNG, so the formation scroll bar can call it per tick from one Formation.
+ */
+export function elevationAtStep(mesh: Mesh, params: WorldParams, formation: Formation, step: number): ElevationResult {
+  const n = mesh.numRegions;
+  const nb = mesh.numBoundaryRegions;
+  const nbrs: number[] = [];
+
+  // ---- 1. lat / lon
+  const r_lat = new Float32Array(n);
+  const r_lon = new Float32Array(n);
+  for (let r = 0; r < n; r++) {
+    const ll = cellLatLon(mesh, params, r);
+    r_lat[r] = ll[0];
+    r_lon[r] = ll[1];
+  }
+
+  // ---- 4b. raw height at this step against the absolute sea
+  const sea = formation.seaLevel;
+  const raw = rawAtStep(formation, step);
   const r_water = new Uint8Array(n);
   for (let r = 0; r < n; r++) r_water[r] = r < nb || raw[r] < sea ? 1 : 0;
-
   // ---- 5. ocean flood fill from the ring across water cells
   const queue = new Int32Array(n);
   const seen = new Uint8Array(n);
@@ -356,6 +375,12 @@ export function computeElevation(
   }
 
   return { r_elevation, r_water, r_coastHops, r_slope, r_lat, r_lon, formation };
+}
+
+export function computeElevation(
+  mesh: Mesh, params: WorldParams, rng: Rng, tec: Tectonics,
+): ElevationResult {
+  return elevationAtStep(mesh, params, buildFormation(mesh, params, rng, tec), params.formationStep);
 }
 
 export function computeDistanceField(

@@ -9,11 +9,17 @@ import type { World, WorldParams } from './core/types';
 import { DEFAULT_PARAMS } from './core/types';
 
 const mocks = vi.hoisted(() => ({
-  generate: vi.fn(),
+  prepareBase: vi.fn(),
+  generateFromBase: vi.fn(),
   renderWorld: vi.fn(),
 }));
 
-vi.mock('./gen/world', () => ({ generate: mocks.generate }));
+// baseKey stays real: main.ts uses it to decide when the prepared base can be reused.
+vi.mock('./gen/world', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./gen/world')>()),
+  prepareBase: mocks.prepareBase,
+  generateFromBase: mocks.generateFromBase,
+}));
 vi.mock('./gen/features', () => ({ buildPoliticalView: () => ({}) }));
 vi.mock('./ui/editor', () => ({ initEditor: () => {} }));   // the edit layer queries the real DOM; not under test here
 vi.mock('./render/painter', () => ({
@@ -22,6 +28,7 @@ vi.mock('./render/painter', () => ({
     borders: true, provinces: false, settlements: true, labels: true, grid: false, furniture: true,
   },
   renderWorld: mocks.renderWorld,
+  renderFrame: () => {},
 }));
 
 const FONT_TEXT = '12px "IM Fell English"';
@@ -96,14 +103,16 @@ async function boot(hash: string, fontLists?: Record<string, unknown[]>): Promis
   return dom;
 }
 
+type StubBase = { seed: string; params: WorldParams; timings: Record<string, number> };
+
 function lastParams(): WorldParams {
-  const calls = mocks.generate.mock.calls as [string, WorldParams][];
+  const calls = mocks.generateFromBase.mock.calls as [StubBase, WorldParams][];
   return calls[calls.length - 1][1];
 }
 
 function lastSeed(): string {
-  const calls = mocks.generate.mock.calls as [string, WorldParams][];
-  return calls[calls.length - 1][0];
+  const calls = mocks.generateFromBase.mock.calls as [StubBase, WorldParams][];
+  return calls[calls.length - 1][0].seed;
 }
 
 function lastFontReady(): boolean {
@@ -112,9 +121,11 @@ function lastFontReady(): boolean {
 }
 
 beforeEach(() => {
-  mocks.generate.mockReset();
+  mocks.prepareBase.mockReset();
+  mocks.generateFromBase.mockReset();
   mocks.renderWorld.mockReset();
-  mocks.generate.mockImplementation((seed: string, params: WorldParams) => stubWorld(seed, params));
+  mocks.prepareBase.mockImplementation((seed: string, params: WorldParams): StubBase => ({ seed, params, timings: {} }));
+  mocks.generateFromBase.mockImplementation((b: StubBase, params: WorldParams) => stubWorld(b.seed, params));
 });
 
 afterEach(() => {
@@ -179,12 +190,32 @@ describe('main hash parsing', () => {
     expect(auto.location.hash).toBe('#seed=abc');
   });
 
+  it('reuses the prepared base across nation counts and formation steps, rebuilds it for a new seed', async () => {
+    const dom = await boot('#seed=abc');
+    expect(mocks.prepareBase).toHaveBeenCalledTimes(1);
+    const fire = (hash: string): void => {
+      dom.location.hash = hash;
+      for (const fn of dom.windowListeners.get('hashchange') ?? []) fn({});
+    };
+    fire('#seed=abc&nations=5');
+    await vi.waitFor(() => expect(mocks.generateFromBase).toHaveBeenCalledTimes(2));
+    fire('#seed=abc&nations=5&step=3');
+    await vi.waitFor(() => expect(mocks.generateFromBase).toHaveBeenCalledTimes(3));
+    expect(mocks.prepareBase).toHaveBeenCalledTimes(1);
+    fire('#seed=xyz');
+    await vi.waitFor(() => expect(mocks.generateFromBase).toHaveBeenCalledTimes(4));
+    expect(mocks.prepareBase).toHaveBeenCalledTimes(2);
+    fire('#seed=xyz&cells=12');
+    await vi.waitFor(() => expect(mocks.generateFromBase).toHaveBeenCalledTimes(5));
+    expect(mocks.prepareBase).toHaveBeenCalledTimes(3);
+  });
+
   it('a hashchange to an empty value also falls back to defaults', async () => {
     const dom = await boot('#seed=abc&cells=16');
     expect(lastParams().cellSpacing).toBe(16);
     dom.location.hash = '#seed=abc&cells=';
     for (const fn of dom.windowListeners.get('hashchange') ?? []) fn({});
-    await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(mocks.generateFromBase).toHaveBeenCalledTimes(2));
     expect(lastParams().cellSpacing).toBe(DEFAULT_PARAMS.cellSpacing);
     expect(dom.location.hash).toBe('#seed=abc');
   });
