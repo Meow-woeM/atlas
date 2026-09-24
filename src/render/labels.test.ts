@@ -1,6 +1,9 @@
 /**
- * render/labels.test.ts — unit tests for the pure label helpers (no canvas, no DOM).
- * painter.ts is mocked so the ink constants resolve without a DOM.
+ * render/labels.test.ts — unit tests for the pure label helpers (no canvas, no DOM), placeLabels
+ * smoke tests on a hand-built world, and one placement guard on a generated world (every
+ * settlement label keeps ICON_GAP from its icon square at r_x/r_y and nothing but a nation label
+ * sits on an icon or a port's anchor tick). painter.ts is mocked so the ink constants resolve
+ * without a DOM.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -15,6 +18,14 @@ import {
 import type { Box } from './labels';
 import type { PoliticalView, RenderOptions, World } from '../core/types';
 import { DEFAULT_PARAMS } from '../core/types';
+import { generate } from '../gen/world';
+import { buildPoliticalView } from '../gen/features';
+
+// Mirrors ICON_HALF / ICON_GAP / ANCHOR_BOX in labels.ts (the anchor tick is stroked at the icon
+// center + (6, 6) by painter.ts drawSettlements).
+const ICON_HALF = { city: 5, town: 3.5, village: 2 } as const;
+const ICON_GAP = 4;
+const anchorBox = (x: number, y: number): Box => [x + 3.5, y + 2.75, x + 8.5, y + 8.75];
 
 describe('fonts', () => {
   it('fontStack returns the named faces with a Georgia fallback', () => {
@@ -250,5 +261,64 @@ describe('placeLabels', () => {
     const cap = labels.find((l) => l.text === 'Capital');
     const vil = labels.find((l) => l.text === 'Village');
     if (cap !== undefined && vil !== undefined) expect(boxesOverlap(cap.box, vil.box)).toBe(false);
+  });
+  it('keeps a port label off the anchor tick when its NE offset is blocked', () => {
+    const { world, view } = fakeWorld();
+    // Cell 4 holds a city whose icon square (half 5 at (320, 290)) covers the port village's NE
+    // box [306, 292, 348, 300]. The SE box [306, 300, 348, 308] clears every icon square but
+    // crosses the anchor tick stroked at (306, 306), so placement must move on to NW.
+    world.mesh = { ...world.mesh, r_x: new Float32Array([100, 300, 500, 700, 320]), r_y: new Float32Array([100, 300, 500, 300, 290]), numRegions: 5 };
+    world.settlements[1].port = true;
+    world.settlements.push({ ...world.settlements[2], id: 3, name: 'C', r: 4, kind: 'city', died: -1 });
+    const labels = placeLabels(world, view, measure, opts);
+    const vil = labels.find((l) => l.text === 'Village');
+    expect(vil).toBeDefined();
+    if (vil === undefined) return;
+    expect(boxesOverlap(anchorBox(300, 300), vil.box)).toBe(false);
+    expect(vil.box[2]).toBeLessThanOrEqual(300 - ICON_HALF.village - ICON_GAP); // NW
+    expect(vil.box[1]).toBeCloseTo(292);
+  });
+});
+
+// ---------------------------------------------------------------- placement guard on a generated world
+
+describe('placeLabels on a generated world', () => {
+  it('keeps settlement labels clear of icon squares and port anchor ticks', () => {
+    // cellSpacing 16 on this seed: 15 living settlements, 13 of them ports, all three kinds.
+    const world = generate('review-d', { cellSpacing: 16 });
+    const labels = placeLabels(world, buildPoliticalView(world), measure, opts);
+    const rx = world.mesh.r_x;
+    const ry = world.mesh.r_y;
+    const settlements = world.settlements;
+    const isCapital = new Uint8Array(settlements.length);
+    for (const n of world.politics.nations) {
+      if (n.died === -1 && n.capital >= 0) isCapital[n.capital] = 1;
+    }
+    const names = settlements.filter((s) => s.died === -1).map((s) => s.name);
+    expect(new Set(names).size).toBe(names.length); // own-label lookup below is by name
+    let ownLabels = 0, ports = 0, gapViolations = 0, iconHits = 0, anchorHits = 0;
+    for (let i = 0; i < settlements.length; i++) {
+      const s = settlements[i];
+      if (s.died !== -1) continue;
+      const half = ICON_HALF[s.kind] + (isCapital[i] ? 1 : 0);
+      const icon: Box = [rx[s.r] - half, ry[s.r] - half, rx[s.r] + half, ry[s.r] + half];
+      const grown: Box = [icon[0] - ICON_GAP, icon[1] - ICON_GAP, icon[2] + ICON_GAP, icon[3] + ICON_GAP];
+      const anchor = anchorBox(rx[s.r], ry[s.r]);
+      if (s.port) ports++;
+      for (const l of labels) {
+        if (l.kind === 'nation') continue; // nations are forced and may cover anything
+        if (l.kind === 'settlement' && l.text === s.name) {
+          ownLabels++;
+          if (boxesOverlap(grown, l.box)) gapViolations++;
+        }
+        if (boxesOverlap(icon, l.box)) iconHits++;
+        if (s.port && boxesOverlap(anchor, l.box)) anchorHits++;
+      }
+    }
+    expect(ownLabels).toBeGreaterThan(0);
+    expect(ports).toBeGreaterThan(0);
+    expect(gapViolations).toBe(0);
+    expect(iconHits).toBe(0);
+    expect(anchorHits).toBe(0);
   });
 });

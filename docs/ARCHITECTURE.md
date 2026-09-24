@@ -512,7 +512,7 @@ sets `ctx.setTransform(opts.scale, 0, 0, opts.scale, 0, 0)` once and draws every
 
 | # | Layer | Toggle | Technique |
 |---|---|---|---|
-| 1 | Parchment | — | Flat `#e9dcb8`; a cached offscreen value-noise canvas at 1/4 output resolution drawn with `multiply` at α 0.35; radial vignette to `rgba(80,50,20,0.25)`; ~400 dark specks and ~150 faint fiber strokes at α 0.04. Cached per (output size, seed). |
+| 1 | Parchment | — | Flat `#e9dcb8`; a cached offscreen value-noise canvas at 1/4 output resolution drawn with `multiply` at α 0.35; radial vignette to `rgba(80,50,20,0.25)`; ~400 dark specks and ~150 faint fiber strokes at α 0.04. Cached per (output size, seed) for sheets up to 32 MiB; the 4x sheet is transient. |
 | 2 | Ocean wash | — | Fill the frame with `#d9cfae`, then fill the **land path** (all `features.coast` loops in one `Path2D`, `evenodd`) with `#e9dcb8`. No per-cell union. |
 | 3 | Waterlines | `waterlines` | Stroke `features.waterlines[i]` at widths 0.9/0.7/0.5/0.4 px and α 0.55/0.35/0.2/0.1 in sea-ink `#3b4a5a`. True thin parallel lines from the distance field. |
 | 3b | Stipple | `stipple` | Dots on ocean cells with `−30 < r_coastDist < 0`, count per cell `∝ 1/(1+|dist|/6)`, positions from the ink RNG. Engraved alternative to waterlines; both may be on. |
@@ -522,7 +522,7 @@ sets `ctx.setTransform(opts.scale, 0, 0, opts.scale, 0, 0)` once and draws every
 | 7 | Relief | `relief` | Cells with `elevation > 0.62`: mountain glyph at center + jitter, size `8 + 16·(elev−0.62)/0.38`, asymmetric peak filled with parchment, ridge stroke 1.1 px, 2–3 hatch strokes on the shadow (east) face, 4 path variants; `0.42–0.62`: hill arcs; sorted by y so nearer peaks overlap farther ones. ~3–5k paths. |
 | 8 | Rivers | `rivers` | `riverPaths[i]` stroked per segment with width `0.6 + 1.6·sqrt(flux_along / maxFlux)` (taper from source), round joins, ink; a 0.4 px lighter parallel stroke gives the pen highlight. Drawn before the coast so mouths meet the coast ink cleanly. |
 | 9 | Coastline | — | Stroke coast loops 1.5 px ink α 0.9, then a second 0.5 px stroke offset 1 px inland (double-line coast). |
-| 10 | Borders | `borders` / `provinces` | Nation borders: 9 px stroke in the nation's color at α 0.18 clipped to the nation's side of the line (clip = the union of that nation's province cell polygons, one `Path2D` per nation, built once per view), then a 1 px dashed ink `[6,4]`. Province borders: 0.5 px dotted, faint. |
+| 10 | Borders | `borders` / `provinces` | Nation borders: 9 px stroke in the nation's color at α 0.18 clipped to the nation's side of the line (clip = that nation's own `PoliticalView` border loops in one `Path2D` per nation under the nonzero rule — the nation is on every loop's left, so an enclave's loop winds the other way and is excluded — built once per view and memoized on the view object; the renderer never reads `r_nation`), then a 1 px dashed ink `[6,4]`. Province borders: 0.5 px dotted, faint. |
 | 11 | Settlements | `settlements` | City: castle glyph (rect + two towers) with dot; town: double circle; village: dot; capital: castle with a flag; port: anchor tick. |
 | 12 | Labels | `labels` | See 6.3. |
 | 13 | Graticule | `grid` | Lines every 5 degrees from the frame, 0.4 px α 0.35, degree labels in the margin. Drawn under 12. |
@@ -532,7 +532,7 @@ sets `ctx.setTransform(opts.scale, 0, 0, opts.scale, 0, 0)` once and draws every
 
 `placeLabels(world, view, measure, opts)` is pure and returns `PlacedLabel[]`; `drawLabels` paints them. Fonts: `IM Fell English` (settlements, rivers italic), `IM Fell English SC` (nations, seas, ranges), Georgia/serif fallback. All text is drawn as a 3 px parchment `strokeText` halo then an ink `fillText` (grafted from the raster pitch), so labels stay legible over hatching.
 
-- Settlements: 8/10/13 px by kind (+2 for capitals), 4 offsets (NE, SE, NW, SW) tried against an axis-aligned box list in priority order (capitals, cities, towns, villages); first non-colliding wins, villages drop.
+- Settlements: 8/10/13 px by kind (+2 for capitals), 4 offsets (NE, SE, NW, SW) tried against an axis-aligned box list in priority order (capitals, cities, towns, villages); first non-colliding wins, villages drop. The box list starts with every living settlement's icon square and, for ports, the anchor tick's box, both anchored at the cell center `r_x/r_y` where layer 11 draws the glyphs.
 - Nations: letter-spaced small caps at `nationLabel_r`, size `14 + 10·sqrt(area / maxArea)`, rotated to the nation's principal axis clamped to ±12 degrees.
 - Rivers: the 3 longest get text-along-path on the straightest window ≥ 1.2x text width, one glyph per `fillText` rotated to the local tangent, flipped to stay upright.
 - Seas and ranges: italic (seas) / small caps (ranges), tracked, straight along the PCA axis at the pole cell.
@@ -739,6 +739,7 @@ export const NATION_COLORS: readonly string[];
 // gen/language.ts
 export function makeLanguage(rng: Rng): Language;
 export function makeWord(lang: Language, rng: Rng, kind?: MorphemeKind): string;   // capitalized, with optional morpheme
+export const ENDS_WITH_VOWEL: RegExp;   // /[vowel letter, accented or not]$/i from a literal table (no normalize / \p{..}, so no ICU dependence); for names.ts demonyms
 
 // gen/names.ts
 export function assignNames(world: World): void;        // fills every name field in place; per-entity forks of world.seed
@@ -756,8 +757,8 @@ export function toWorldFile(world: World): WorldFile;
 export function fromWorldFile(file: WorldFile): World;    // regenerate + restore politics if present
 
 // render/parchment.ts
-export function parchmentCanvas(seed: string, wPx: number, hPx: number): HTMLCanvasElement;   // cached by (seed, wPx, hPx)
-export function tintCanvas(world: World, wPx: number, hPx: number): HTMLCanvasElement;         // blurred biome tint, cached by (seed, wPx, hPx)
+export function parchmentCanvas(seed: string, wPx: number, hPx: number): HTMLCanvasElement;   // cached by (seed, wPx, hPx) for sheets up to 32 MiB; the 4x sheet is transient
+export function tintCanvas(world: World, wPx: number, hPx: number): HTMLCanvasElement;         // blurred biome tint, cached per World object (a WeakMap) and (wPx, hPx)
 
 // render/glyphs.ts
 export function mountainPath(variant: number, size: number): Path2D;   // origin at base center
@@ -790,7 +791,7 @@ export function downloadBlob(blob: Blob, filename: string): void;
 // - reads #seed=<s>&land=<f>&wind=<d>&cells=<r> on load, writes it on every generate
 // - Randomize: 8-char seed from crypto.getRandomValues; Generate; scale select 1x/2x/4x; Export
 // - layer checkboxes -> re-render only (no regenerate); timing readout from world.timings + render ms
-// - awaits document.fonts.load('12px "IM Fell English"') with a 1500 ms timeout before the first render
+// - awaits document.fonts.load for all three faces the renderer uses ('12px "IM Fell English"', 'italic 12px "IM Fell English"', '12px "IM Fell English SC"') with a 1500 ms timeout before the first render; empty hash values (`#cells=`) count as missing
 // - canvas sized to fit the container, drawn at devicePixelRatio
 ```
 

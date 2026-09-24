@@ -18,7 +18,9 @@
  * language has favorite sounds; the shuffle decides which. Syllables matching a RESTRICTED pattern
  * (doubled phoneme, sibilant, liquid, nasal+liquid or glide clusters) are re-rolled, and a syllable whose
  * junction with the previous one would double a digraph or a vowel, stack sibilants or triple a letter is
- * re-rolled too. lang.ortho holds a spelling for every phoneme in the inventory.
+ * re-rolled too. lang.ortho holds a spelling for every phoneme in the inventory. Vowel checks use the
+ * VOWEL_LETTERS table (every vowel spelling the orthographies can emit), never String.prototype.normalize
+ * or a \p{..} class, so the draws they gate are identical on runtimes built without ICU.
  *
  * makeWord builds a core word of nsyl syllables, spells it, strips leading/trailing apostrophes, and
  * (with a kind, 60% of calls) prepends or appends (50/50) one morpheme of that kind with lang.joiner.
@@ -123,6 +125,17 @@ const VOWEL_ORTHO: readonly Readonly<Record<string, string>>[] = [
   { 'A': 'aa', 'E': 'ee', 'I': 'ii', 'O': 'oo', 'U': 'uu' },   // doubles
   { 'A': 'au', 'E': 'ei', 'I': 'ie', 'O': 'ou', 'U': 'oo' },   // diphthongs
 ];
+
+/**
+ * Every vowel letter the VOWEL_ORTHO / DEFAULT_ORTHO tables can emit; keep in sync with them.
+ * Deliberately a literal table rather than normalize('NFD') + /\p{M}/u: on a no-ICU runtime normalize is
+ * the identity and \p{..} is a SyntaxError, and hasVowel decides how many draws makeWord and makeLanguage
+ * consume, so it must depend on the seed alone (language.test.ts pins both properties).
+ */
+const VOWEL_LETTERS = 'aeiouáéíóúäëïöüâêîôûāēīōūàèìòù';
+const HAS_VOWEL = new RegExp('[' + VOWEL_LETTERS + ']', 'i');
+/** True if a spelled word ends in a vowel letter, accented or not; names.ts uses it to drop one before a demonym suffix. */
+export const ENDS_WITH_VOWEL = new RegExp('[' + VOWEL_LETTERS + ']$', 'i');
 
 const MORPHEME_KINDS = ['city', 'river', 'lake', 'sea', 'mount', 'wood', 'realm', 'port'] as const satisfies readonly MorphemeKind[];
 
@@ -258,9 +271,9 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-/** True if the string contains a Latin vowel letter, with or without a diacritic. */
+/** True if the string contains a vowel letter from VOWEL_LETTERS, with or without a diacritic. */
 function hasVowel(s: string): boolean {
-  return /[aeiou]/i.test(s.normalize('NFD'));
+  return HAS_VOWEL.test(s);
 }
 
 /** Per-language cache of digraphsOf; keyed weakly so a Language stays plain data and cloneable. */
