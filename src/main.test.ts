@@ -165,6 +165,20 @@ describe('main hash parsing', () => {
     expect(dom.replaceState.mock.calls[0][2]).toBe('#seed=abc&cells=32');
   });
 
+  it('nations: absent or "auto" is auto, integers clamp to the select\'s 3..12 and round, junk falls back', async () => {
+    expect((await boot('#seed=abc'), lastParams().nations)).toBe('auto');
+    expect((await boot('#seed=abc&nations=auto'), lastParams().nations)).toBe('auto');
+    expect((await boot('#seed=abc&nations=5'), lastParams().nations)).toBe(5);
+    expect((await boot('#seed=abc&nations=7.4'), lastParams().nations)).toBe(7);
+    expect((await boot('#seed=abc&nations=1'), lastParams().nations)).toBe(3);
+    expect((await boot('#seed=abc&nations=99'), lastParams().nations)).toBe(12);
+    expect((await boot('#seed=abc&nations=many'), lastParams().nations)).toBe('auto');
+    const dom = await boot('#seed=abc&nations=6');
+    expect(dom.location.hash).toBe('#seed=abc&nations=6');
+    const auto = await boot('#seed=abc&nations=auto');
+    expect(auto.location.hash).toBe('#seed=abc');
+  });
+
   it('a hashchange to an empty value also falls back to defaults', async () => {
     const dom = await boot('#seed=abc&cells=16');
     expect(lastParams().cellSpacing).toBe(16);

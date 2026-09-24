@@ -313,7 +313,8 @@ export function worldTitle(world: World): string {
   const numNations = nations.length;
   if (numNations === 0) return UNNAMED_TITLE;
 
-  // Nations by owned province count, descending, lower id first on ties.
+  // Nations by owned province count, descending, lower id first on ties: the world speaks the
+  // dominant nation's tongue, but it is not called after any nation.
   const counts = new Int32Array(numNations);
   for (let p = 0; p < p_nation.length; p++) {
     const n = p_nation[p];
@@ -324,25 +325,39 @@ export function worldTitle(world: World): string {
   order.sort((a, b) => counts[b] - counts[a] || a - b);
 
   const largest = nations[order[0]];
-  let x = largest.name;
-  if (x === '' && largest.culture >= 0 && largest.culture < cultures.length) x = cultures[largest.culture].name;
-  if (x === '') return UNNAMED_TITLE;
+  if (largest.name === '') return UNNAMED_TITLE;          // assignNames has not run
+  const c = largest.culture >= 0 && largest.culture < cultures.length ? largest.culture : -1;
+  const lang = c >= 0 ? cultures[c].language : null;
+  if (lang === null || lang.consonants.length === 0 || lang.vowels.length === 0) return UNNAMED_TITLE;
+
+  // Every name in the world is taken, so the title's word can never be a nation's (or a town's).
+  const used = new Set<string>();
+  for (const n of nations) claim(used, n.name);
+  for (const cu of cultures) claim(used, cu.name);
+  for (const s of world.settlements) claim(used, s.name);
+  for (const pr of world.provinces) claim(used, pr.name);
+  const { rivers, lakes, seas, ranges } = world.features;
+  for (const r of rivers) claim(used, r.name);
+  for (const l of lakes) claim(used, l.name);
+  for (const se of seas) claim(used, se.name);
+  for (const g of ranges) claim(used, g.name);
+
+  const rng = fork(world.seed, 'names', 'world');
+  const x = uniqueName(used, rng, lang, (r) => makeWord(lang, r, 'realm'));
 
   const ys: string[] = [];
-  if (numNations > 1 && nations[order[1]].name !== '') ys.push(nations[order[1]].name);
-  const seas = world.features.seas;
   let bigSea = -1;
   for (let i = 0; i < seas.length; i++) {
     if (bigSea < 0 || seas[i].cells.length > seas[bigSea].cells.length) bigSea = i;
   }
   if (bigSea >= 0 && seas[bigSea].name !== '') ys.push(seas[bigSea].name);
 
-  const rng = fork(world.seed, 'names', 'world');
-  const variant = rng.int(0, ys.length > 0 ? 3 : 2);
+  const variant = rng.int(0, ys.length > 0 ? 4 : 3);
   switch (variant) {
     case 0: return 'The ' + x + ' Lands';
     case 1: return 'The Realms of ' + x;
     case 2: return 'Lands of ' + x;
+    case 3: return 'The ' + x + ' Reach';
     default: return x + ' and the ' + rng.pick(ys) + ' Shores';
   }
 }

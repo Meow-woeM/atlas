@@ -4,9 +4,7 @@ import { DEFAULT_PARAMS } from '../core/types';
 import type { Mesh, WorldParams } from '../core/types';
 import { generatePoints } from './poisson';
 import {
-  buildMesh, s_next_s, s_prev_s, s_end_r, s_inner_t, s_outer_t,
-  r_circulate_s, r_circulate_r, r_circulate_t, t_circulate_r, t_circulate_t, t_circulate_s,
-  r_is_boundary, cellPolygon, cellLatLon, cellUnitVector, downwindOrder,
+  buildMesh, s_next_s, s_prev_s, s_end_r, s_inner_t, s_outer_t, r_circulate_s, r_circulate_r, r_circulate_t, t_circulate_r, t_circulate_t, t_circulate_s, r_is_boundary, cellPolygon, cellLatLon, cellUnitVector, downwindOrder, buildCellLookup, nearestCell, cellCentroids,
 } from './dualmesh';
 
 const SMALL: WorldParams = { ...DEFAULT_PARAMS, width: 400, height: 300, cellSpacing: 40 };
@@ -320,5 +318,51 @@ describe('dualmesh default mesh', () => {
     }
     console.log(`buildMesh default: first ${buildMs.toFixed(1)} ms, best ${best.toFixed(1)} ms`);
     expect(best).toBeLessThan(50);
+  });
+});
+
+describe('nearest-cell lookup', () => {
+  const p = { ...DEFAULT_PARAMS, cellSpacing: 12 };
+  const { points, numBoundary } = generatePoints(p, fork('lookup', 'points'));
+  const mesh = buildMesh(points, numBoundary);
+  const { r_px, r_py } = cellCentroids(mesh);
+  const lookup = buildCellLookup(mesh, 2 * p.cellSpacing);
+
+  function bruteForce(x: number, y: number): number {
+    let best = -1, bestD = Infinity;
+    for (let r = 0; r < mesh.numRegions; r++) {
+      const dx = r_px[r] - x, dy = r_py[r] - y;
+      const d = dx * dx + dy * dy;
+      if (d < bestD || (d === bestD && r < best)) { bestD = d; best = r; }
+    }
+    return best;
+  }
+
+  it('buckets every cell exactly once, in ascending index within a bucket', () => {
+    expect(lookup.cells.length).toBe(mesh.numRegions);
+    expect(lookup.start[lookup.cols * lookup.rows]).toBe(mesh.numRegions);
+    const seen = new Uint8Array(mesh.numRegions);
+    let unsorted = 0;
+    for (let b = 0; b < lookup.cols * lookup.rows; b++) {
+      for (let k = lookup.start[b]; k < lookup.start[b + 1]; k++) {
+        seen[lookup.cells[k]]++;
+        if (k > lookup.start[b] && lookup.cells[k] <= lookup.cells[k - 1]) unsorted++;
+      }
+    }
+    expect(unsorted).toBe(0);
+    expect(seen.every((v) => v === 1)).toBe(true);
+  });
+
+  it('agrees with brute force on every centroid, on random positions and outside the grid', () => {
+    let wrong = 0;
+    for (let r = 0; r < mesh.numRegions; r++) if (nearestCell(lookup, r_px[r], r_py[r]) !== r) wrong++;
+    const rng = fork('lookup', 'probes');
+    for (let i = 0; i < 2000; i++) {
+      const x = rng.float(-80, p.width + 80), y = rng.float(-80, p.height + 80);
+      if (nearestCell(lookup, x, y) !== bruteForce(x, y)) wrong++;
+    }
+    expect(nearestCell(lookup, -5000, -5000)).toBe(bruteForce(-5000, -5000));
+    expect(nearestCell(lookup, 1e6, 3)).toBe(bruteForce(1e6, 3));
+    expect(wrong).toBe(0);
   });
 });

@@ -148,7 +148,10 @@ export function initEditor(hooks: EditorHooks): void {
   const style = document.createElement('style');
   style.textContent = '.editor{border-top:1px solid #8b7658;margin-top:1rem;padding-top:.6rem}.editor h2,.editor h3{margin:.5rem 0}.editor p{font-size:.78rem}.editor-swatches{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:.5rem}.editor-swatches button{width:25px;height:25px;border:2px solid transparent;border-radius:50%;padding:0}.editor-swatches button.active{border-color:#17130e}.editor>input{box-sizing:border-box;width:100%}.editor details{margin:.4rem 0}.editor-name{display:grid;grid-template-columns:5rem 1fr;gap:.35rem;align-items:center;margin:.2rem 0}.editor-name span{font-size:.72rem;overflow:hidden;text-overflow:ellipsis}.editor-name input{min-width:0}';
   container.append(heading, borderHeading, swatches, fineLabel, hint, namesHeading, filter, names, style);
-  sidebar.append(container);
+  // Above the export block when index.html has one, so export stays the last thing in the sidebar.
+  const exportField = sidebar.querySelector<HTMLElement>('#export-field');
+  if (exportField) sidebar.insertBefore(container, exportField);
+  else sidebar.append(container);
 
   let activeNation = 0;
   let indexedWorld: World | null = null;

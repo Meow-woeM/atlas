@@ -14,12 +14,21 @@
  *          and, from computeDistanceField, { distField, r_coastDist }.
  *
  * THE FORMATION TIMELINE. The three fields raw height is mixed from — basement noise, continental
- * craton and tectonic uplift — do not depend on time; only how much of each is mixed in does. So
- * `Formation` stores the three fields once and `rawAtStep` evaluates a moment in one pass over the
- * cells, instead of storing FORMATION_STEPS snapshots. Sea level is ABSOLUTE: it is the quantile
- * that gives params.landFraction at the LAST step, and every earlier step is measured against that
- * same level. That is what makes the land appear to form — the sea does not fall, the continents
- * rise through it — and it is why the last step reproduces the world as if there were no timeline.
+ * craton and tectonic uplift — do not depend on time; only how much of each is mixed in does, and
+ * WHERE the crust is. `Formation` stores the fields once and `rawAtStep` evaluates a moment in one
+ * pass over the cells, instead of storing FORMATION_STEPS snapshots. Sea level is ABSOLUTE: it is
+ * the quantile that gives params.landFraction at the LAST step, and every earlier step is measured
+ * against that same level, so the last step reproduces the world as if there were no timeline.
+ *
+ * PLATE DRIFT (2026-09-23). The crust rides its plate. A plate of velocity v still has
+ * drift x (1 - u) px of travel left at position u on the timeline, so the crust sitting at cell r
+ * then is the crust that will END at q = r + v x drift x (1 - u): rawAtStep reads the final noise
+ * and craton of the cell nearest q (Formation.lookup). When q lies on another plate that crust does
+ * not exist yet — it is the ocean the collision has since closed — and r reads as bare sea floor:
+ * its own basement noise, no craton. Uplift stays at the plate boundaries, where the belts are, and
+ * ramps up as the plates arrive. So converging continents close an ocean and raise mountains where
+ * they meet, diverging ones split along the rift, and the present day (u = 1, displacement 0) is
+ * the stored fields bit for bit.
  *
  * Stage 4, exactly as ARCHITECTURE.md section 5 lists it:
  *   1. r_lat / r_lon through cellLatLon; the noise position is cellUnitVector(r) (the unit sphere).
@@ -69,7 +78,7 @@ import type { Tectonics } from './tectonics';
 import { makeSimplex3, fbm3 } from '../core/noise';
 import { quantile } from '../core/geom';
 import { makeRaster, rasterizeCells, edt, sampleBilinear } from '../core/raster';
-import { cellLatLon, cellUnitVector, cellCentroids, r_circulate_r } from '../mesh/dualmesh';
+import { cellLatLon, cellUnitVector, cellCentroids, r_circulate_r, buildCellLookup, nearestCell } from '../mesh/dualmesh';
 
 export interface ElevationResult {
   r_elevation: Float32Array; r_water: Uint8Array; r_coastHops: Int16Array; r_slope: Float32Array;
@@ -86,9 +95,15 @@ const W_CRATON = 0.34;
 const W_UPLIFT = 0.30;
 /** A rift drops less than a collision lifts. */
 const RIFT_W = 0.55;
-/** Ramp floors at step 0: how much of each field the world starts with. */
-const NOISE_FLOOR = 0.55;
-const CRATON_FLOOR = 0.30;
+/** Ramp floors at step 0: how much of each field the world starts with. The craton is mostly there
+ *  from the start — the story is continents moving and colliding, not rising out of the sea — and
+ *  the basement is nearly complete; what accumulates from nothing is the uplift. */
+const NOISE_FLOOR = 0.75;
+const CRATON_FLOOR = 0.70;
+/** Plate drift over the whole timeline, logical px per unit plate speed (speeds are 0.4..1). */
+const DRIFT_PX = 160;
+/** Nearest-cell grid bucket, in multiples of the Poisson spacing. */
+const LOOKUP_BUCKET = 2;
 /** Domain-warp amplitude in noise units (ARCHITECTURE.md stage 4 step 2). */
 const WARP = 0.08;
 /** Water elevation ceiling: strictly below sea level. */
@@ -110,9 +125,12 @@ function stepFraction(step: number, steps: number): number {
 
 /**
  * Raw height at one moment: one pass over the cells mixing the three time-independent fields under
- * the ramps. The basement is mostly there from the start (NOISE_FLOOR), the craton thickens along a
- * smoothstep, and uplift accumulates from nothing, slightly faster than linearly at the end so the
- * young mountains arrive late. Fills `out` when given, allocates otherwise.
+ * the ramps, with the noise and craton read from where the plate has carried them (see the file
+ * comment). The basement is mostly there from the start (NOISE_FLOOR), the craton thickens along a
+ * smoothstep from CRATON_FLOOR, and uplift accumulates from nothing, slightly faster than linearly
+ * at the end so the young mountains arrive late. At the last step the displacement is zero and the
+ * fields are read as stored, so the present day never depends on the lookup. Fills `out` when
+ * given, allocates otherwise.
  */
 export function rawAtStep(f: Formation, step: number, out?: Float32Array): Float32Array {
   const n = f.r_noise.length;
@@ -121,9 +139,29 @@ export function rawAtStep(f: Formation, step: number, out?: Float32Array): Float
   const nRamp = NOISE_FLOOR + (1 - NOISE_FLOOR) * u;
   const cRamp = CRATON_FLOOR + (1 - CRATON_FLOOR) * smoothstep(u);
   const uRamp = Math.pow(u, 1.15);
+  const back = (1 - u) * f.drift;   // travel the plates still have ahead of them, per unit speed
+  if (!(back > 0)) {
+    for (let r = 0; r < n; r++) {
+      raw[r] = (W_NOISE * f.r_noise[r] * nRamp
+        + W_CRATON * f.r_craton[r] * cRamp
+        + W_UPLIFT * f.r_uplift[r] * uRamp) * f.r_falloff[r];
+    }
+    return raw;
+  }
+  const { r_plate, plateVx, plateVy, lookup } = f;
+  const { r_px, r_py } = lookup;
   for (let r = 0; r < n; r++) {
-    raw[r] = (W_NOISE * f.r_noise[r] * nRamp
-      + W_CRATON * f.r_craton[r] * cRamp
+    const pl = r_plate[r];
+    // The crust here now is the crust that will end at q, carried the rest of the way by its plate.
+    const c = nearestCell(lookup, r_px[r] + plateVx[pl] * back, r_py[r] + plateVy[pl] * back);
+    let noise = f.r_noise[r];
+    let craton = 0;
+    if (c >= 0 && r_plate[c] === pl) {
+      noise = f.r_noise[c];
+      craton = f.r_craton[c];
+    }
+    raw[r] = (W_NOISE * noise * nRamp
+      + W_CRATON * craton * cRamp
       + W_UPLIFT * f.r_uplift[r] * uRamp) * f.r_falloff[r];
   }
   return raw;
@@ -214,6 +252,11 @@ export function computeElevation(
     r_uplift,
     r_falloff,
     seaLevel: 0,
+    r_plate: tec.r_plate,
+    plateVx: tec.plateVx,
+    plateVy: tec.plateVy,
+    drift: DRIFT_PX,
+    lookup: buildCellLookup(mesh, LOOKUP_BUCKET * params.cellSpacing, { r_px, r_py }),
   };
 
   // ---- 4. sea level, ABSOLUTE: the landFraction quantile at the LAST step, so every earlier step

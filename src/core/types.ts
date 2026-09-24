@@ -34,6 +34,7 @@ export interface WorldParams {
   provinceSpacing: number;    // Poisson radius for province sites in logical px (48 -> ~140 provinces)
   settlementsMax: number;     // 40
   nationsMax: number;         // 8. Caps the capital-seeded nations only; free cities are added on top.
+  nations: number | 'auto';   // 'auto': K from the settlement count (stage 11); a number asks for exactly that many
 }
 
 export const DEFAULT_PARAMS: WorldParams = {
@@ -41,7 +42,7 @@ export const DEFAULT_PARAMS: WorldParams = {
   frame: { lon0: -20, lon1: 20, lat0: 58, lat1: 28 },
   landFraction: 0.42, continents: 2, plates: 9, formationStep: FORMATION_STEPS - 1,
   windDir: 'random', lakesMax: 8, riverPercentile: 0.94,
-  provinceSpacing: 48, settlementsMax: 40, nationsMax: 8,
+  provinceSpacing: 48, settlementsMax: 40, nationsMax: 8, nations: 'auto',
 };
 
 // ---------------------------------------------------------------- mesh
@@ -83,10 +84,31 @@ export type BiomeIndex = number;
 export interface Raster { w: number; h: number; scale: number; data: Float32Array; }
 
 /**
+ * Uniform grid over cell centroids for nearest-cell queries: which final cell sits at an arbitrary
+ * logical position. mesh/dualmesh.ts builds it (buildCellLookup) and reads it (nearestCell); the
+ * formation timeline uses it to read the crust that will end at a displaced position.
+ */
+export interface CellLookup {
+  cellSize: number;          // bucket side, logical px
+  cols: number; rows: number;
+  minX: number; minY: number;
+  start: Int32Array;         // CSR: bucket b holds cells[start[b] .. start[b + 1])
+  cells: Int32Array;         // cell indices, bucketed row-major, ascending within a bucket
+  r_px: Float32Array; r_py: Float32Array;   // the centroids the grid was built from
+}
+
+/**
  * The time-independent parts of raw height, plus the absolute sea level every step is read against.
  * gen/elevation.ts builds it and rawAtStep / landMaskAtStep evaluate a moment from it, so the
  * formation timeline never stores a snapshot per step. Plain typed arrays: structured-cloneable,
  * and cheap enough to re-evaluate on every tick of the scroll bar.
+ *
+ * Plate drift (2026-09-23): the crust rides its plate. At an earlier step a cell reads the FINAL
+ * noise and craton of the cell its plate will have carried there by the present day, `drift x
+ * (1 - u)` px back along the plate's velocity, and crust that will not exist by then (the sample
+ * lands on another plate: an ocean the collision has since closed) reads as bare sea floor. So
+ * converging continents close an ocean and raise their belt where they meet, and diverging ones
+ * split apart; at the last step the displacement is zero and the fields are read as stored.
  */
 export interface Formation {
   steps: number;
@@ -95,6 +117,11 @@ export interface Formation {
   r_uplift: Float32Array;    // tectonic uplift, + convergent / - rift, shaped by craton
   r_falloff: Float32Array;   // edge falloff, 0 at the rectangle's margin up to 1 inland
   seaLevel: number;          // absolute: the landFraction quantile of raw at the LAST step
+  r_plate: Int16Array;       // plate per cell (from Tectonics)
+  plateVx: Float32Array;     // per plate, drift velocity (from Tectonics)
+  plateVy: Float32Array;
+  drift: number;             // logical px a plate of unit speed travels over the whole timeline
+  lookup: CellLookup;        // nearest final cell at a displaced position
 }
 
 export interface Geography {

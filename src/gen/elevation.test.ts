@@ -349,9 +349,10 @@ describe('formation timeline', () => {
   }
 
   it('never loses land as time runs forward', () => {
-    // The promise the scroll bar makes: continents rise through a fixed sea, they do not come and
-    // go. Sea level is absolute (the landFraction quantile at the last step), and every ramp in
-    // rawAtStep is non-decreasing in u, so land can only be gained.
+    // The promise the scroll bar makes: the world grows toward the present against a fixed sea.
+    // Sea level is absolute (the landFraction quantile at the last step) and every ramp in
+    // rawAtStep is non-decreasing in u. Individual cells DO come and go now that the crust rides
+    // its plate (see the churn test below), but the total never drops on the tuning seeds.
     let drops = 0;
     for (const { mesh, elev } of built) {
       let prev = -1;
@@ -364,12 +365,14 @@ describe('formation timeline', () => {
     expect(drops).toBe(0);
   });
 
-  it('starts mostly ocean and ends at params.landFraction', () => {
+  it('starts with proto-continents already there, well short of the present, and ends at params.landFraction', () => {
     for (const { seed, mesh, elev } of built) {
       const first = landFractionAt(mesh, elev.formation, 0);
       const last = landFractionAt(mesh, elev.formation, FORMATION_STEPS - 1);
-      expect(first, seed).toBeLessThan(0.2);
-      expect(last, seed).toBeGreaterThan(first);
+      // Not an empty sea: the story is continents moving and colliding, not rising from nothing.
+      expect(first, seed).toBeGreaterThan(0.1);
+      expect(first, seed).toBeLessThan(0.3);
+      expect(last, seed).toBeGreaterThan(first + 0.1);
       // The last step is the world as if there were no timeline at all.
       expect(Math.abs(last - DEFAULT_PARAMS.landFraction), seed).toBeLessThan(0.02);
     }
@@ -411,8 +414,34 @@ describe('formation timeline', () => {
       if (then.r_water[r] === 0) thenLand++;
     }
     expect(thenLand).toBeLessThan(nowLand);
-    // The plates do not move, so the same fields back the two moments.
+    // The same time-independent fields and the same absolute sea back both moments.
     expect(then.formation.seaLevel).toBe(now.formation.seaLevel);
     expect(then.formation.r_craton).toEqual(now.formation.r_craton);
+  });
+
+  it('moves the crust: some cells are land at an earlier step and sea by the present day', () => {
+    // Under the old ramps-only model land could only ever be gained cell by cell, so this count
+    // was zero. With plate drift, crust that sits over a closing ocean early on is gone by the end.
+    for (const { seed, mesh, elev } of built) {
+      const last = landMaskAtStep(mesh, elev.formation, FORMATION_STEPS - 1);
+      let churn = 0;
+      for (let step = 0; step < FORMATION_STEPS - 1; step += 3) {
+        const mask = landMaskAtStep(mesh, elev.formation, step);
+        for (let r = mesh.numBoundaryRegions; r < mesh.numRegions; r++) if (mask[r] === 1 && last[r] === 0) churn++;
+      }
+      expect(churn, seed).toBeGreaterThan(0);
+    }
+  });
+
+  it('reads the present day straight from the stored fields, so the lookup never touches the final world', () => {
+    const { elev } = built[0];
+    const f = elev.formation;
+    const raw = rawAtStep(f, FORMATION_STEPS - 1);
+    let off = 0;
+    for (let r = 0; r < raw.length; r++) {
+      const direct = (0.42 * f.r_noise[r] + 0.34 * f.r_craton[r] + 0.30 * f.r_uplift[r]) * f.r_falloff[r];
+      if (Math.abs(raw[r] - direct) > 1e-6) off++;
+    }
+    expect(off).toBe(0);
   });
 });

@@ -229,6 +229,18 @@ fieldset#layers input[type='checkbox']:focus-visible {
   margin: 0;
 }
 
+/* Export lives at the very bottom of the sidebar, below the edit panel, and stays pinned to the
+   bottom edge while the rest of the sidebar scrolls. */
+#export-field {
+  position: sticky;
+  bottom: -16px;
+  margin: 4px -16px -16px;
+  padding: 12px 16px 16px;
+  background: var(--paper);
+  border-top: 1px solid var(--rule);
+  box-shadow: 0 -8px 12px -10px rgba(0, 0, 0, 0.35);
+}
+
 /* ---------------------------------------------------------------- stage */
 
 #stage {

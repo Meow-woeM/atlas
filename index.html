@@ -27,6 +27,23 @@
           <input id="seed" name="seed" type="text" maxlength="64" spellcheck="false" placeholder="type a seed" />
         </div>
 
+        <div class="field">
+          <label for="nations">Nations</label>
+          <select id="nations" name="nations" title="How many nations the world is divided into">
+            <option value="auto" selected>Auto</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+            <option value="7">7</option>
+            <option value="8">8</option>
+            <option value="9">9</option>
+            <option value="10">10</option>
+            <option value="11">11</option>
+            <option value="12">12</option>
+          </select>
+        </div>
+
         <div class="row">
           <button type="button" id="randomize" title="New random seed, then generate">Randomize</button>
           <button type="submit" id="generate" class="primary" title="Generate the world for this seed">Generate</button>
@@ -48,24 +65,25 @@
           <label><input type="checkbox" id="layer-furniture" /> Furniture</label>
         </fieldset>
 
-        <div class="field">
-          <label for="scale">Export size</label>
-          <div class="row">
-            <select id="scale" name="scale" title="Export scale (1x = 1024x768)">
-              <option value="1">1x</option>
-              <option value="2" selected>2x</option>
-              <option value="4">4x</option>
-            </select>
-            <button type="button" id="export" title="Download a PNG of the current map">Export PNG</button>
-          </div>
-        </div>
-
         <pre id="timings" aria-live="polite"></pre>
       </form>
 
       <footer class="about">
         <p>Share a world with its link: the seed lives in the URL hash.</p>
       </footer>
+
+      <!-- Last in the sidebar on purpose; the edit panel (ui/editor.ts) inserts itself above it. -->
+      <div id="export-field" class="field">
+        <label for="scale">Export</label>
+        <div class="row">
+          <select id="scale" name="scale" title="Export scale (1x = 1024x768)">
+            <option value="1">1x</option>
+            <option value="2" selected>2x</option>
+            <option value="4">4x</option>
+          </select>
+          <button type="button" id="export" title="Download a PNG of the current map">Export PNG</button>
+        </div>
+      </div>
     </aside>
 
     <main id="stage">

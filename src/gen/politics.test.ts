@@ -25,6 +25,7 @@ import { computeProvinces } from './provinces';
 import { placeSettlements, scoreCell } from './settlements';
 import { applyPoliticalEdits, derivePolitics, foundNations, NATION_COLORS } from './politics';
 import type { Edits } from './edits';
+import { generate } from './world';
 
 const SEED = 'atlas-11';
 const SMALL: WorldParams = {
@@ -430,3 +431,30 @@ for (const w of worlds) {
     });
   });
 }
+
+describe('politics (requested nation count)', () => {
+  // params.nations is a promise: the world ends with exactly that many nations whenever that many
+  // capitals can be seated. Free cities count toward it; settled islands past it are annexed.
+  const cases = [3, 5, 8, 12] as const;
+  for (const seed of ['atlas', 'amberfell']) {
+    it(`${seed}: 3, 5, 8 and 12 nations on request, every settled province owned, one culture per nation`, () => {
+      for (const count of cases) {
+        const w = generate(seed, { nations: count });
+        const { nations, cultures, p_nation } = w.politics;
+        expect(nations.length, `${seed} x ${count}`).toBe(count);
+        expect(cultures.length).toBe(nations.length);
+        let orphans = 0;
+        for (const s of w.settlements) if (p_nation[s.province] < 0) orphans++;
+        expect(orphans, `${seed} x ${count}: settlements outside every nation`).toBe(0);
+        for (const nation of nations) expect(p_nation[w.settlements[nation.capital].province]).toBe(nation.id);
+      }
+    });
+  }
+
+  it('auto is unchanged by the selector code path and the hash default is auto', () => {
+    const a = generate('atlas');
+    const b = generate('atlas', { nations: 'auto' });
+    expect(b.politics.nations.length).toBe(a.politics.nations.length);
+    expect(a.params.nations).toBe('auto');
+  });
+});
