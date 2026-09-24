@@ -112,13 +112,14 @@ export interface WorldParams {
   provinceSpacing: number;    // Poisson radius for province sites in logical px (48 -> ~140 provinces)
   settlementsMax: number;     // 40
   nationsMax: number;         // 8
+  nations: number | 'auto';   // 'auto' (stage 11 picks K); a number asks for exactly that many
 }
 
 export const DEFAULT_PARAMS: WorldParams = {
   version: ATLAS_VERSION, width: 1024, height: 768, cellSpacing: 8, rasterScale: 0.5,
   frame: { lon0: -20, lon1: 20, lat0: 58, lat1: 28 },
   landFraction: 0.42, continents: 2, windDir: 'random', lakesMax: 8, riverPercentile: 0.94,
-  provinceSpacing: 48, settlementsMax: 40, nationsMax: 8,
+  provinceSpacing: 48, settlementsMax: 40, nationsMax: 8, nations: 'auto',
 };
 
 // ---------------------------------------------------------------- mesh
@@ -435,7 +436,9 @@ Two things about the continental cores are load-bearing, both learned by measuri
 7. **Reshape** (mapgen2's coast-distance trick): rank land cells by `raw`, `rankNorm ∈ [0,1]`; `r_elevation = 0.55·rankNorm^1.5 + 0.45·(hops/maxHops)^0.8`; water cells get `−(sea − raw)/sea` clamped to `[-1, 0)`.
 8. `r_slope[r] = max |r_elevation[r] − r_elevation[nbr]|`.
 
-**The formation timeline (added 2026-09-18).** The three fields raw height mixes — basement noise, craton and uplift — do not depend on time; only how much of each is mixed in does. So `Formation` stores the three fields once and `rawAtStep` evaluates a moment in one pass over the cells, instead of storing a snapshot per step. Sea level is **absolute**: the `landFraction` quantile of raw at the LAST step, which every earlier step is measured against. That is what makes the land appear to form — the sea does not fall, the continents rise through it — and it is why the last step reproduces the world as if there were no timeline at all. Land fraction is therefore monotonic in the step and lands on `params.landFraction` at the end; `elevation.test.ts` asserts both. `FORMATION_STEPS` is 24 and `params.formationStep` selects the moment; `landMaskAtStep` is the cheap land/sea read the UI scroll bar previews with while it is being dragged.
+**The formation timeline (added 2026-09-18).** The three fields raw height mixes — basement noise, craton and uplift — do not depend on time; only how much of each is mixed in does. So `Formation` stores the three fields once and `rawAtStep` evaluates a moment in one pass over the cells, instead of storing a snapshot per step. Sea level is **absolute**: the `landFraction` quantile of raw at the LAST step, which every earlier step is measured against, and it is why the last step reproduces the world as if there were no timeline at all. Land fraction is monotonic in the step on the tuning seeds and lands on `params.landFraction` at the end; `elevation.test.ts` asserts both. `FORMATION_STEPS` is 24 and `params.formationStep` selects the moment; `landMaskAtStep` is the cheap land/sea read the UI scroll bar previews with while it is being dragged.
+
+**Plate drift (added 2026-09-23).** The first timeline only ramped the three fields up, so every world's story was islands rising out of an empty sea. Now the crust rides its plate. A plate of velocity `v` still has `drift × (1 − u)` px of travel ahead of it at position `u` on the timeline (`drift` = 160 logical px per unit speed; speeds are 0.4–1), so the crust sitting at cell `r` then is the crust that will END at `q = r + v · drift · (1 − u)`: `rawAtStep` reads the final noise and craton of the cell nearest `q` through `Formation.lookup` (a uniform grid over the centroids, `buildCellLookup` / `nearestCell` in `mesh/dualmesh.ts`, bucket 2 × `cellSpacing`). When `q` lies on another plate that crust does not exist yet — it is the ocean the collision has since closed — and `r` reads as bare sea floor: its own basement noise and no craton. Uplift stays where the belts are (the plate boundaries) and ramps up as the plates arrive. So converging continents close an ocean and raise mountains where they meet, diverging ones split along their rift, and the present day (`u = 1`, displacement 0) is the stored fields bit for bit — the lookup never touches the final world, so no `ATLAS_VERSION` bump. The ramp floors moved with it (basement 0.55 → 0.75, craton 0.30 → 0.70): the continents are there from the first step and move, rather than rise from nothing. Measured at the defaults over the four tuning seeds: land 0.16–0.22 at step 0, 0.42 at the last, no step loses land overall, and 3–7% of cells are land at some earlier step and sea by the present (the crust that moved). A step evaluates in ~1.2 ms.
 
 ### Stage 5 — Distance field
 
@@ -470,13 +473,15 @@ Score every land cell: `2.0·fertility[biome] + 0.05·coast + 0.5·riverSide + 0
 
 ### Stage 11 — Cultures and nations
 
-- `K = clamp(round(n / 5), 3, nationsMax)` capitals = highest-scoring settlements re-chosen with a 150 px spacing, one per province at most.
+- `K = clamp(round(n / 5), 3, nationsMax)` capitals = highest-scoring settlements re-chosen with a 150 px spacing, one per province at most. **Requested count (2026-09-23):** when `params.nations` is a number, `K` is that number; if the spacing seats fewer, it is relaxed (× 0.7 per retry, floored at 1 hop) until `K` are seated or the spacing is 1 hop.
 - One culture per capital; `home_p` = capital's province; `p_culture` by Dijkstra over the province graph with cost `1 + hostility(biome) + 3·(mountain link)`, so culture edges follow mountains and deserts.
 - Nations: Dijkstra over the **province graph** from the K capitals, link cost `1 + 3·cultureMismatch + 2·(shared border < 20 px) + 4·(either province mean elev > 0.6)`, ocean impassable, capped at 12 hops; every province joins the nearest capital → `p_nation`. Provinces on islands unreachable from any capital become free cities (`p_nation` = a new nation whose capital is the island's best settlement) if they have a settlement, else unclaimed (`-1`).
 - `derivePolitics` fills `r_nation` from `p_nation` through `r_province`.
 - Emit events: `culture.emerged`, `nation.founded`, one `province.claimed` per province (`cause` = the nation's founding seq), `settlement.founded` for every settlement.
 
 **Corrected 2026-09-18 (review).** The doc used to say `cultures.length === K`. It is `cultures.length === nations.length`: every free city gets its own culture too, because names.ts needs a language per nation. For the same reason `nationsMax` caps only the **primary**, capital-seeded nations (`K = clamp(round(n / 5), 3, nationsMax)`, the `nationsMax` clamp applied last so it wins over the minimum of 3) — free cities are appended after it, so `nations.length` may exceed `nationsMax`. Measured at seed `probe`: `continents: 1` gives 9 nations and `continents: 3` gives 10 against the default `nationsMax` of 8. That is the intended behaviour (an island with a town is a polity), not a bug; it is the doc and the `nationsMax` comment that were wrong.
+
+**Requested count and free cities (2026-09-23).** With `params.nations` a number, step 7 founds free cities only while `nations.length` is below it; every later settled component is **annexed** by the nation whose capital cell is nearest (Euclidean over `cellCentroids`, lower index on ties) to the component's best settlement, and provinces of the component that had no culture take the annexing nation's. The world therefore ends with exactly the requested number whenever that many capitals could be seated (the UI offers 3–12; `generate('atlas', { nations: 12 })` gives 12). `'auto'` is the day-one behaviour above, unchanged.
 
 Nothing in this stage writes to any geography object, and nothing outside `Politics` stores a nation index except `Settlement.culture` (a founding fact).
 
@@ -676,6 +681,8 @@ export function t_circulate_s(mesh: Mesh, t: number, out: number[]): number[];  
 export function r_is_boundary(mesh: Mesh, r: number): boolean;
 export function cellPolygon(mesh: Mesh, r: number, out: Float32Array): number;   // writes xy pairs, returns point count
 export function cellCentroids(mesh: Mesh, out?: { r_px: Float32Array; r_py: Float32Array }): { r_px: Float32Array; r_py: Float32Array };  // the sanctioned cell position
+export function buildCellLookup(mesh: Mesh, cellSize: number, centroids?: { r_px: Float32Array; r_py: Float32Array }): CellLookup;  // uniform grid over the centroids
+export function nearestCell(lookup: CellLookup, x: number, y: number): number;  // lower index on ties; clamps outside the grid; the formation timeline's drift read
 export function cellLatLon(mesh: Mesh, params: WorldParams, r: number): [lat: number, lon: number];
 export function cellUnitVector(mesh: Mesh, params: WorldParams, r: number, out: Float64Array): Float64Array;
 export function downwindOrder(mesh: Mesh, dir: WindDir): Int32Array;   // interior cells sorted upwind -> downwind
@@ -697,6 +704,8 @@ export interface Tectonics {
 export function computeTectonics(mesh: Mesh, params: WorldParams, rng: Rng): Tectonics;
 
 // gen/elevation.ts
+// Formation carries r_plate / plateVx / plateVy / drift / lookup (a CellLookup) for plate drift;
+// rawAtStep reads the present day (the last step) from the stored fields without the lookup.
 export function rawAtStep(f: Formation, step: number, out?: Float32Array): Float32Array;
 export function landMaskAtStep(mesh: Mesh, f: Formation, step: number, out?: Uint8Array): Uint8Array;  // 1 land, 0 water
 export interface ElevationResult {
@@ -743,7 +752,7 @@ export const ENDS_WITH_VOWEL: RegExp;   // /[vowel letter, accented or not]$/i f
 
 // gen/names.ts
 export function assignNames(world: World): void;        // fills every name field in place; per-entity forks of world.seed
-export function worldTitle(world: World): string;
+export function worldTitle(world: World): string;   // a word of its own in the dominant nation's tongue, never a nation's, culture's or town's name (2026-09-23)
 
 // gen/features.ts
 export function extractFeatures(world: Pick<World, 'mesh' | 'edges' | 'geo' | 'params'>, hydro: HydrologyResult): Features;   // rivers/lakes unnamed until assignNames
@@ -817,8 +826,10 @@ export function applyPoliticalEdits(world: World, edits: Edits): void;
 
 // render/painter.ts
 export function renderFormationPreview(mesh: Mesh, r_land: Uint8Array, ctx: CanvasRenderingContext2D,
-  opts: { scale: number; width: number; height: number }): void;
-// Paints a mask gen computed (landMaskAtStep); the renderer still computes no geography.
+  opts: { scale: number; width: number; height: number; seed: string }): void;
+// Paints a mask gen computed (landMaskAtStep) in the map's own materials — the seeded parchment
+// sheet, ocean wash, parchment land, an ink coast, the frame — so settling only adds detail.
+// The renderer still computes no geography.
 
 // ui/editor.ts — builds its own DOM into #sidebar; not unit tested (node environment, no DOM)
 export function initEditor(hooks: EditorHooks): void;

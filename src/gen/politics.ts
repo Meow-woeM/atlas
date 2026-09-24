@@ -6,7 +6,7 @@
  * smaller index through core/heap.ts. The parameter is kept so the call site and the stream name
  * are frozen for the history sim (src/sim/) that will draw dynastic randomness from it.
  *
- * Inputs:  Mesh, WorldParams (cellSpacing, nationsMax), Geography (r_water, r_elevation, r_biome
+ * Inputs:  Mesh, WorldParams (cellSpacing, nationsMax, nations), Geography (r_water, r_elevation, r_biome
  *          and everything scoreCell reads), the stage-9 provinces / ProvinceGraph / r_province and
  *          the stage-10 settlements / r_settlement. Geography, provinces, graph, r_province and
  *          r_settlement are never mutated.
@@ -21,11 +21,14 @@
  * Steps, as ARCHITECTURE.md section 5 "Stage 11" lists them, with the topology-only reading:
  *   1. Settlement scores = scoreCell(mesh, geo, r); settlement order = score desc, index asc
  *      (typed-array index sort).
- *   2. K = clamp(round(n / 5), 3, nationsMax). Capitals are taken greedily in that order: a
+ *   2. K = clamp(round(n / 5), 3, nationsMax) when params.nations is 'auto', else params.nations
+ *      itself (the count the user asked for). Capitals are taken greedily in that order: a
  *      settlement qualifies when its province holds no capital yet and no earlier capital lies
  *      within CAPITAL_SPACING_HOPS - 1 BFS hops over land cells (r_circulate_r), i.e. capitals are
  *      at least CAPITAL_SPACING_HOPS = round(150 / cellSpacing) hops apart (19 at the defaults).
- *      When fewer than K qualify, K shrinks to the number found.
+ *      When fewer than K qualify, K shrinks to the number found — except for a requested count,
+ *      where the spacing is relaxed (x SPACING_RELAX, floored at 1 hop) and the pick repeated
+ *      until K are found or the spacing is 1 hop.
  *   3. One Culture per capital: { id i, name '', color NATION_COLORS[i % 12], language =
  *      emptyLanguage() (a fresh placeholder that names.ts replaces from
  *      fork(seed, 'names', 'culture:<i>', 'lang'); language.ts is NOT imported here), home_p =
@@ -50,6 +53,12 @@
  *      best settlement (scoreCell desc, smaller index on ties), owning the whole component, with
  *      a new Culture (same id, next color, placeholder language, home_p = the capital's province)
  *      written over p_culture of the component. A component without settlements stays -1.
+ *      With a requested count (params.nations a number), free cities are founded only while
+ *      nations.length < that count; every later settled component is ANNEXED instead by the
+ *      nation whose capital cell is nearest (Euclidean over cellCentroids, lower nation index on
+ *      ties) to the component's best settlement, and provinces of the component that had no
+ *      culture take the annexing nation's. So the world ends with exactly the requested number of
+ *      nations whenever that many capitals could be seated.
  *   8. settlements[i].culture = p_culture[province]; r_nation via derivePolitics.
  *   9. Events, seq = index in the returned array, all at year 0, in this order: culture.emerged
  *      per culture (subjects [culture:i], at = its nation's capital cell, data {}); nation.founded
@@ -67,7 +76,7 @@ import type {
 import { BIOMES } from '../core/types';
 import { MinHeap } from '../core/heap';
 import { mkId } from '../core/ids';
-import { r_circulate_r } from '../mesh/dualmesh';
+import { r_circulate_r, cellCentroids } from '../mesh/dualmesh';
 import { scoreCell } from './settlements';
 import type { Edits } from './edits';
 
@@ -92,6 +101,8 @@ const CAPITAL_SPACING_PX = 150;
 /** Settlements per nation before clamping to [MIN_NATIONS, nationsMax]. */
 const SETTLEMENTS_PER_NATION = 5;
 const MIN_NATIONS = 3;
+/** With a requested nation count, the capital spacing shrinks by this factor per retry. */
+const SPACING_RELAX = 0.7;
 /** Culture-spread cost terms. */
 const HOSTILITY: Record<Biome, number> = {
   ocean: 0, lake: 0, snow: 2, tundra: 2, bare: 2, scorched: 2, taiga: 1, shrubland: 1,
@@ -148,9 +159,15 @@ export function foundNations(
   order.sort((a, b) => sc[b] - sc[a] || a - b);
 
   // ---- 2. capitals
-  let K = Math.round(n / SETTLEMENTS_PER_NATION);
-  if (K < MIN_NATIONS) K = MIN_NATIONS;
-  if (K > params.nationsMax) K = params.nationsMax;
+  const requested = params.nations === 'auto' ? -1 : Math.max(1, Math.round(params.nations));
+  let K: number;
+  if (requested >= 0) {
+    K = requested;
+  } else {
+    K = Math.round(n / SETTLEMENTS_PER_NATION);
+    if (K < MIN_NATIONS) K = MIN_NATIONS;
+    if (K > params.nationsMax) K = params.nationsMax;
+  }
   let spacingHops = Math.round(CAPITAL_SPACING_PX / params.cellSpacing);
   if (spacingHops < 1) spacingHops = 1;
   const tooClose = new Uint8Array(nr);
@@ -158,33 +175,45 @@ export function foundNations(
   const queue = new Int32Array(nr);
   const depth = new Int32Array(nr);
   const stamp = new Int32Array(nr);          // 0 = unvisited, else 1 + capital index
-  const capitals: number[] = [];
-  for (let k = 0; k < n && capitals.length < K; k++) {
-    const i = order[k];
-    const s = settlements[i];
-    const p = s.province;
-    if (p < 0 || p >= numP || provinceTaken[p] === 1 || tooClose[s.r] === 1) continue;
-    capitals.push(i);
-    provinceTaken[p] = 1;
-    const mark = capitals.length;
-    let head = 0, tail = 0;
-    queue[tail++] = s.r;
-    stamp[s.r] = mark;
-    depth[s.r] = 0;
-    while (head < tail) {
-      const u = queue[head++];
-      tooClose[u] = 1;
-      const d = depth[u];
-      if (d >= spacingHops - 1) continue;
-      r_circulate_r(mesh, u, scratch);
-      for (let j = 0; j < scratch.length; j++) {
-        const v = scratch[j];
-        if (r_water[v] !== 0 || stamp[v] === mark) continue;
-        stamp[v] = mark;
-        depth[v] = d + 1;
-        queue[tail++] = v;
+  const pickCapitals = (hops: number): number[] => {
+    tooClose.fill(0);
+    provinceTaken.fill(0);
+    stamp.fill(0);
+    const picked: number[] = [];
+    for (let k = 0; k < n && picked.length < K; k++) {
+      const i = order[k];
+      const s = settlements[i];
+      const p = s.province;
+      if (p < 0 || p >= numP || provinceTaken[p] === 1 || tooClose[s.r] === 1) continue;
+      picked.push(i);
+      provinceTaken[p] = 1;
+      const mark = picked.length;
+      let head = 0, tail = 0;
+      queue[tail++] = s.r;
+      stamp[s.r] = mark;
+      depth[s.r] = 0;
+      while (head < tail) {
+        const u = queue[head++];
+        tooClose[u] = 1;
+        const d = depth[u];
+        if (d >= hops - 1) continue;
+        r_circulate_r(mesh, u, scratch);
+        for (let j = 0; j < scratch.length; j++) {
+          const v = scratch[j];
+          if (r_water[v] !== 0 || stamp[v] === mark) continue;
+          stamp[v] = mark;
+          depth[v] = d + 1;
+          queue[tail++] = v;
+        }
       }
     }
+    return picked;
+  };
+  let capitals = pickCapitals(spacingHops);
+  // A requested count is a promise: pack the capitals closer until it is met or spacing is 1 hop.
+  while (requested >= 0 && capitals.length < K && spacingHops > 1) {
+    spacingHops = Math.max(1, Math.floor(spacingHops * SPACING_RELAX));
+    capitals = pickCapitals(spacingHops);
   }
   K = capitals.length;
 
@@ -297,6 +326,7 @@ export function foundNations(
   }
   const seen = new Uint8Array(numP);
   const pqueue = new Int32Array(numP);
+  let centroids: { r_px: Float32Array; r_py: Float32Array } | null = null;
   for (let p0 = 0; p0 < numP; p0++) {
     if (p_nation[p0] >= 0 || seen[p0] === 1) continue;
     let head = 0, tail = 0;
@@ -321,6 +351,27 @@ export function foundNations(
       }
     }
     if (best < 0) continue;
+    if (requested >= 0 && nations.length >= requested && nations.length > 0) {
+      // The count is met: the component joins the nation whose capital is nearest its best town.
+      if (centroids === null) centroids = cellCentroids(mesh);
+      const sr = settlements[best].r;
+      const sx = centroids.r_px[sr], sy = centroids.r_py[sr];
+      let nearest = 0;
+      let nearestD = Infinity;
+      for (let j = 0; j < nations.length; j++) {
+        const cr = settlements[nations[j].capital].r;
+        const dx = centroids.r_px[cr] - sx, dy = centroids.r_py[cr] - sy;
+        const d = dx * dx + dy * dy;
+        if (d < nearestD) { nearestD = d; nearest = j; }
+      }
+      const culture = nations[nearest].culture;
+      for (let k = 0; k < tail; k++) {
+        const q = pqueue[k];
+        p_nation[q] = nearest;
+        if (p_culture[q] < 0) p_culture[q] = culture;
+      }
+      continue;
+    }
     const id = nations.length;
     cultures.push(makeCulture(id, settlements[best].province));
     nations.push(makeNation(id, best));

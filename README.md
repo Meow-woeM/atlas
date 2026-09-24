@@ -21,7 +21,7 @@ npm run typecheck  # tsc --noEmit
 The seed and the generation parameters live in the URL hash, so a world is shareable as a link:
 
 ```
-#seed=<string>&land=<fraction>&wind=<0-7|random>&cells=<spacing>&step=<0-23>
+#seed=<string>&land=<fraction>&wind=<0-7|random>&cells=<spacing>&step=<0-23>&nations=<3-12|auto>
 ```
 
 - `seed` is any string; the Randomize button makes an 8-letter one. Omit it and the app picks one at random.
@@ -29,12 +29,23 @@ The seed and the generation parameters live in the URL hash, so a world is share
 - `wind` is the compass point the prevailing wind blows from: `0` W, `1` NW, `2` N, `3` NE, `4` E, `5` SE, `6` S, `7` SW, or `random` (default).
 - `cells` is the Poisson-disc spacing in logical px (default `8`; `6` is detailed, `12` is instant).
 - `step` is the moment on the land-formation timeline, `0` (earliest) to `23` (the present day, the default). Omitted from the hash at the present day.
+- `nations` asks for exactly that many nations (the sidebar select offers 3 to 12); omit it, or `auto`, for the day-one rule of one nation per ~5 settlements plus a free city per settled island.
 
 Example: `https://<host>/atlas/#seed=amberfell&land=0.45&wind=2&cells=8`
 
-## Status: day one complete (2026-09-17); sampler retuned, tectonics, formation timeline and the edit layer (2026-09-18)
+## Status: day one complete (2026-09-17); sampler retuned, tectonics, formation timeline and the edit layer (2026-09-18); plate drift, nation count, world names and UI polish (2026-09-23)
 
-Every module in `docs/ARCHITECTURE.md` section 7 exists, the three gates are green (`npm test`: 379 tests in 21 files; `npm run typecheck`: zero errors; `npm run build`: tsc + vite, ~94 kB of JS) and the app runs in headless Chromium. Re-checked after the sampler retune on 2026-09-18: seeds `atlas`, `amberfell`, `test-1` and `zzzzzzzz` each generate and render a complete map (coast, relief, rivers, lakes, borders, settlements, labels, cartouche, compass, scale bar) with no console errors from the app, and the 2x PNG export works. Those numbers -- generate 184-333 ms wall, 1x screen render 78-122 ms, 2x export 527 ms -- came from a sandboxed Linux container, so they are slower than the 2026-09-17 laptop run (170-195 ms / 65-105 ms / ~440 ms) and are not comparable to it; the node measurements below are the ones to track. That sandbox cannot reach the webfont CDN, so the run also exercised the fallback-serif path rather than IM Fell English. The deployed site is https://meow-woem.github.io/atlas/ (GitHub Pages, built by `.github/workflows/pages.yml` on every push to `main`).
+**2026-09-23.** Six changes from a review of the live site:
+
+- **The plates play into the formation.** The timeline used to ramp three static fields up, so every world's story was islands rising from an empty sea. Now the crust rides its plate: an earlier step reads the final crust displaced back along the plate's drift, and crust that will have been subducted by the present reads as sea floor. Converging continents close an ocean and raise their mountain belt where they meet; diverging ones split. The present day is untouched (no `ATLAS_VERSION` bump). Details under stage 4 in the architecture doc.
+- **No more blue-and-white flash while dragging the bar.** The drag preview is painted in the map's own materials (seeded parchment, ocean wash, parchment land, ink coast, frame), so settling only adds the detail.
+- **A nation count.** The `Nations` select (auto, or 3 to 12) and `&nations=` in the hash ask politics for exactly that many; capital spacing relaxes as needed and settled islands past the count are annexed by the nearest nation instead of becoming free cities.
+- **The world is named in its own right.** The cartouche title is a fresh word in the dominant nation's tongue, never a nation's, culture's or town's name.
+- **The seed is a URL, not map furniture.** The cartouche no longer prints it.
+- **Export sits at the bottom of the sidebar**, pinned there while the rest scrolls.
+
+
+Every module in `docs/ARCHITECTURE.md` section 7 exists, the three gates are green (`npm test`: 438 tests in 27 files; `npm run typecheck`: zero errors; `npm run build`: tsc + vite, ~94 kB of JS) and the app runs in headless Chromium. Re-checked after the sampler retune on 2026-09-18: seeds `atlas`, `amberfell`, `test-1` and `zzzzzzzz` each generate and render a complete map (coast, relief, rivers, lakes, borders, settlements, labels, cartouche, compass, scale bar) with no console errors from the app, and the 2x PNG export works. Those numbers -- generate 184-333 ms wall, 1x screen render 78-122 ms, 2x export 527 ms -- came from a sandboxed Linux container, so they are slower than the 2026-09-17 laptop run (170-195 ms / 65-105 ms / ~440 ms) and are not comparable to it; the node measurements below are the ones to track. That sandbox cannot reach the webfont CDN, so the run also exercised the fallback-serif path rather than IM Fell English. The deployed site is https://meow-woem.github.io/atlas/ (GitHub Pages, built by `.github/workflows/pages.yml` on every push to `main`).
 
 ### What exists and passes
 

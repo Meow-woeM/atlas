@@ -2,7 +2,8 @@
  * main.ts — app shell: DOM wiring, URL hash, generate/render loop, PNG export. Not a generation stage.
  * RNG stream: none. The only nondeterministic call in the app is crypto.getRandomValues, used here to
  * mint an 8-letter seed when the URL hash has none (or when Randomize is pressed).
- * Inputs: location.hash (#seed=<s>&land=<f>&wind=<d>&cells=<r>) and the controls in index.html.
+ * Inputs: location.hash (#seed=<s>&land=<f>&wind=<d>&cells=<r>&step=<n>&nations=<k>) and the controls
+ * in index.html.
  * Outputs: the rendered <canvas id="map">, the <pre id="timings"> readout, location.hash on every
  * generate, and PNG downloads via render/export.
  */
@@ -32,6 +33,9 @@ const FONT_TEXT_ITALIC = 'italic ' + FONT_TEXT;
 const FONT_SMALLCAPS = '12px "IM Fell English SC"';
 const WIND_NAMES = ['W', 'NW', 'N', 'NE', 'E', 'SE', 'S', 'SW'] as const;
 const SEED_ALPHABET = 'abcdefghijklmnopqrstuvwxyz';
+/** The nation counts the <select> offers; the hash clamps into the same range. */
+const NATIONS_MIN = 3;
+const NATIONS_MAX = 12;
 
 // ---------------------------------------------------------------- DOM
 
@@ -42,6 +46,7 @@ function byId<T extends HTMLElement>(id: string): T {
 }
 
 const seedInput = byId<HTMLInputElement>('seed');
+const nationsSelect = byId<HTMLSelectElement>('nations');
 const randomizeBtn = byId<HTMLButtonElement>('randomize');
 const generateBtn = byId<HTMLButtonElement>('generate');
 const scaleSelect = byId<HTMLSelectElement>('scale');
@@ -112,7 +117,17 @@ function parseNumber(raw: string | null, lo: number, hi: number): number | undef
   return Math.min(hi, Math.max(lo, n));
 }
 
-/** Reads #seed=<s>&land=<f>&wind=<d>&cells=<r>&step=<n>. Missing or malformed values fall back to defaults. */
+/** 'auto', or an integer clamped to the <select>'s range; anything else is missing. */
+function parseNations(raw: string | null): number | 'auto' | undefined {
+  const s = hashValue(raw);
+  if (s === undefined) return undefined;
+  if (s === 'auto') return 'auto';
+  const n = Number(s);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.min(NATIONS_MAX, Math.max(NATIONS_MIN, Math.round(n)));
+}
+
+/** Reads #seed=<s>&land=<f>&wind=<d>&cells=<r>&step=<n>&nations=<k>. Missing or malformed values fall back to defaults. */
 function readHash(): { seed: string | null; params: WorldParams } {
   const q = new URLSearchParams(location.hash.replace(/^#/, ''));
   const next: WorldParams = { ...DEFAULT_PARAMS, frame: { ...DEFAULT_PARAMS.frame } };
@@ -124,6 +139,8 @@ function readHash(): { seed: string | null; params: WorldParams } {
   if (cells !== undefined) next.cellSpacing = cells;
   const step = parseNumber(q.get('step'), 0, FORMATION_STEPS - 1);
   if (step !== undefined) next.formationStep = Math.round(step);
+  const nations = parseNations(q.get('nations'));
+  if (nations !== undefined) next.nations = nations;
   return { seed: hashValue(q.get('seed')) ?? null, params: next };
 }
 
@@ -134,6 +151,7 @@ function writeHash(seed: string, p: WorldParams): void {
   if (p.windDir !== DEFAULT_PARAMS.windDir) q.set('wind', String(p.windDir));
   if (p.cellSpacing !== DEFAULT_PARAMS.cellSpacing) q.set('cells', String(p.cellSpacing));
   if (p.formationStep !== DEFAULT_PARAMS.formationStep) q.set('step', String(p.formationStep));
+  if (p.nations !== DEFAULT_PARAMS.nations) q.set('nations', String(p.nations));
   const next = '#' + q.toString();
   if (location.hash !== next) history.replaceState(null, '', next);
 }
@@ -283,7 +301,7 @@ function previewFormation(step: number): void {
     if (!ctx) return;
     const mask = landMaskAtStep(world.mesh, world.geo.formation, step);
     renderFormationPreview(world.mesh, mask, ctx, {
-      scale, width: params.width, height: params.height,
+      scale, width: params.width, height: params.height, seed: world.seed,
     });
     lastCanvasW = canvas.width;
     lastCanvasH = canvas.height;
@@ -319,6 +337,10 @@ function syncFormationControl(): void {
   formationNow.disabled = params.formationStep === FORMATION_STEPS - 1;
 }
 
+function syncNationsControl(): void {
+  nationsSelect.value = params.nations === 'auto' ? 'auto' : String(params.nations);
+}
+
 // ---------------------------------------------------------------- generate
 
 function doGenerate(): void {
@@ -337,6 +359,7 @@ function doGenerate(): void {
     exportMs = 0;
     document.title = 'Atlas — ' + seed;
     syncFormationControl();
+    syncNationsControl();
     window.dispatchEvent(new Event('atlas-world-changed'));
   } catch (err) {
     world = null;
@@ -403,6 +426,12 @@ formationNow.addEventListener('click', () => {
 
 randomizeBtn.addEventListener('click', () => {
   seedInput.value = randomSeed();
+  doGenerate();
+});
+
+// A world parameter, not a layer: changing it regenerates (politics is the only stage that reads it).
+nationsSelect.addEventListener('change', () => {
+  params.nations = parseNations(nationsSelect.value) ?? 'auto';
   doGenerate();
 });
 

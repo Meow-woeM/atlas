@@ -914,7 +914,7 @@ function drawFurniture(p: Paint): void {
 
   ctx.save();
   ctx.font = cssFont(16, opts.fontReady ? fontStack('smallcaps') : fallbackStack());
-  cartouche(ctx, 24, 20, worldTitle(world), 'seed: ' + world.seed);
+  cartouche(ctx, 24, 20, worldTitle(world), '');   // the seed is a URL, not part of the map
   ctx.restore();
 }
 
@@ -959,17 +959,21 @@ export function renderWorld(world: World, view: PoliticalView, ctx: CanvasRender
  *
  * Regenerating a whole world per scroll tick costs ~200 ms, which makes the bar feel broken, so
  * dragging draws this instead and the full pipeline runs once the bar is released. It is a
- * deliberately thin slice of renderWorld: the same transform and parchment, cell polygons filled
- * land or sea, and nothing else — no rivers, labels, borders or relief, because none of those
- * exist until the stages downstream of elevation have run at that step.
+ * deliberately thin slice of renderWorld painted in the SAME materials — the seeded parchment
+ * sheet, the ocean wash, parchment land, an ink coast and the frame — so that when the drag
+ * settles the finished map only adds detail on top of what is already there instead of swapping
+ * one picture for another. Nothing else is drawn: rivers, labels, borders and relief do not exist
+ * until the stages downstream of elevation have run at that step.
  *
  * `r_land` is the mask gen/elevation.ts computed (landMaskAtStep); this function only paints it.
  * The renderer still computes no geography, in keeping with the boundary in CLAUDE.md.
  */
 export function renderFormationPreview(
-  mesh: Mesh, r_land: Uint8Array, ctx: CanvasRenderingContext2D, opts: { scale: number; width: number; height: number },
+  mesh: Mesh, r_land: Uint8Array, ctx: CanvasRenderingContext2D,
+  opts: { scale: number; width: number; height: number; seed: string },
 ): void {
   const k = opts.scale;
+  const W = opts.width, H = opts.height;
   ctx.setTransform(k, 0, 0, k, 0, 0);
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
@@ -978,19 +982,38 @@ export function renderFormationPreview(
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
 
-  ctx.fillStyle = SEA_INK;
-  ctx.fillRect(0, 0, opts.width, opts.height);
-
-  const poly = new Float32Array(64);
+  // 1 parchment, exactly as drawParchment lays it
   ctx.fillStyle = PARCHMENT;
-  ctx.beginPath();
+  ctx.fillRect(0, 0, W, H);
+  const pc = parchmentCanvas(opts.seed, Math.round(W * k), Math.round(H * k));
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(pc, 0, 0);
+  ctx.restore();
+
+  // 2 ocean wash and land, as drawOcean does; the land is the union of its cell polygons
+  ctx.fillStyle = OCEAN_WASH;
+  ctx.fillRect(0, 0, W, H);
+  const poly = new Float32Array(64);
+  const land = new Path2D();
   for (let r = mesh.numBoundaryRegions; r < mesh.numRegions; r++) {
     if (r_land[r] !== 1) continue;
     const n = cellPolygon(mesh, r, poly);
     if (n < 3) continue;
-    ctx.moveTo(poly[0], poly[1]);
-    for (let i = 1; i < n; i++) ctx.lineTo(poly[2 * i], poly[2 * i + 1]);
-    ctx.closePath();
+    land.moveTo(poly[0], poly[1]);
+    for (let i = 1; i < n; i++) land.lineTo(poly[2 * i], poly[2 * i + 1]);
+    land.closePath();
   }
-  ctx.fill();
+  // Stroke first, fill on top: the fill covers every interior seam, and what survives of the
+  // stroke is the outer half of the union's outline — a coast line without a coast path.
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 1.2;
+  ctx.globalAlpha = 0.85;
+  ctx.stroke(land);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = PARCHMENT;
+  ctx.fill(land, 'nonzero');
+
+  // 3 the frame, so the border does not pop in when the map settles
+  frame(ctx, W, H);
 }

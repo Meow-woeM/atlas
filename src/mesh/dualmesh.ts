@@ -18,7 +18,7 @@
  */
 
 import Delaunator from 'delaunator';
-import type { Mesh, WindDir, WorldParams } from '../core/types';
+import type { CellLookup, Mesh, WindDir, WorldParams } from '../core/types';
 
 export function buildMesh(points: Float64Array, numBoundary: number): Mesh {
   const numRegions = points.length >> 1;
@@ -215,6 +215,89 @@ export function cellCentroids(
     r_py[r] = sy / k;
   }
   return { r_px, r_py };
+}
+
+// ---------------------------------------------------------------- nearest cell
+
+/**
+ * Uniform grid over the cell centroids (every region, ring included) so a logical position can be
+ * mapped to the nearest cell. `cellSize` is the bucket side; a few times the Poisson spacing keeps
+ * a bucket at a handful of cells. Deterministic: buckets list cells in ascending index.
+ */
+export function buildCellLookup(
+  mesh: Mesh, cellSize: number, centroids?: { r_px: Float32Array; r_py: Float32Array },
+): CellLookup {
+  const n = mesh.numRegions;
+  const { r_px, r_py } = centroids ?? cellCentroids(mesh);
+  const size = cellSize > 1e-6 ? cellSize : 1;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (let r = 0; r < n; r++) {
+    const x = r_px[r], y = r_py[r];
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  if (n === 0) { minX = 0; minY = 0; maxX = 0; maxY = 0; }
+  const cols = Math.max(1, Math.floor((maxX - minX) / size) + 1);
+  const rows = Math.max(1, Math.floor((maxY - minY) / size) + 1);
+  const bucket = new Int32Array(n);
+  const start = new Int32Array(cols * rows + 1);
+  for (let r = 0; r < n; r++) {
+    let bx = Math.floor((r_px[r] - minX) / size);
+    let by = Math.floor((r_py[r] - minY) / size);
+    if (bx < 0) bx = 0; else if (bx >= cols) bx = cols - 1;
+    if (by < 0) by = 0; else if (by >= rows) by = rows - 1;
+    const b = by * cols + bx;
+    bucket[r] = b;
+    start[b + 1]++;
+  }
+  for (let b = 0; b < cols * rows; b++) start[b + 1] += start[b];
+  const cells = new Int32Array(n);
+  const cursor = start.slice(0, cols * rows);
+  for (let r = 0; r < n; r++) cells[cursor[bucket[r]]++] = r;   // ascending r within each bucket
+  return { cellSize: size, cols, rows, minX, minY, start, cells, r_px, r_py };
+}
+
+/**
+ * The cell whose centroid is nearest to logical (x, y); the lower index on an exact tie. Scans the
+ * query's bucket, then each square ring of buckets around it, and stops once the best distance is
+ * within the rings already covered — every unscanned cell is at least ring x cellSize away.
+ * Positions outside the grid clamp to its edge buckets, so the answer is always a real cell.
+ */
+export function nearestCell(lookup: CellLookup, x: number, y: number): number {
+  const { cellSize, cols, rows, minX, minY, start, cells, r_px, r_py } = lookup;
+  if (cells.length === 0) return -1;
+  let bx = Math.floor((x - minX) / cellSize);
+  let by = Math.floor((y - minY) / cellSize);
+  if (!(bx >= 0)) bx = 0; else if (bx >= cols) bx = cols - 1;
+  if (!(by >= 0)) by = 0; else if (by >= rows) by = rows - 1;
+  const maxRing = Math.max(cols, rows);
+  let best = -1;
+  let bestD = Infinity;
+  for (let ring = 0; ring <= maxRing; ring++) {
+    if (ring > 0) {
+      const reach = (ring - 1) * cellSize;   // nothing unscanned can be closer than this
+      if (best >= 0 && bestD <= reach * reach) break;
+    }
+    const y0 = by - ring, y1 = by + ring, x0 = bx - ring, x1 = bx + ring;
+    for (let gy = y0; gy <= y1; gy++) {
+      if (gy < 0 || gy >= rows) continue;
+      const edgeRow = gy === y0 || gy === y1;
+      for (let gx = x0; gx <= x1; gx++) {
+        if (gx < 0 || gx >= cols) continue;
+        if (!edgeRow && gx !== x0 && gx !== x1) continue;   // interior of the square: already scanned
+        const b = gy * cols + gx;
+        for (let k = start[b]; k < start[b + 1]; k++) {
+          const c = cells[k];
+          const dx = r_px[c] - x, dy = r_py[c] - y;
+          const d = dx * dx + dy * dy;
+          if (d < bestD || (d === bestD && c < best)) { bestD = d; best = c; }
+        }
+      }
+    }
+  }
+  return best;
 }
 
 /** Linear map of the cell center into params.frame; lat0 is at y = 0 (top), lon0 at x = 0. */

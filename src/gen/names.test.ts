@@ -216,15 +216,26 @@ for (const w of worlds) {
       expect(langDiff).toBe(0);
     });
 
-    it('titles the world: non-empty, stable, pure, and carrying the largest nation\'s name', () => {
+    it('titles the world: non-empty, stable, pure, and never after a nation, culture or town', () => {
       const before = allNames(world);
       const title = worldTitle(world);
       expect(title.length).toBeGreaterThan(0);
       expect(worldTitle(world)).toBe(title);
       expect(allNames(world)).toEqual(before);
-      const big = largestNation(world);
-      expect(big).toBeGreaterThanOrEqual(0);
-      expect(title).toContain(nations[big].name);
+      expect(largestNation(world)).toBeGreaterThanOrEqual(0);
+      // The title's own word is the part that is not a pattern word or the sea's name.
+      const seaNames = world.features.seas.map((s) => s.name);
+      let core = title;
+      for (const sea of seaNames) core = core.replace(' and the ' + sea + ' Shores', '');
+      core = core.replace(/^The Realms of |^Lands of |^The /, '').replace(/ Lands$| Reach$/, '');
+      expect(core.length).toBeGreaterThan(0);
+      const taken = new Set([
+        ...nations.map((n) => n.name.toLowerCase()),
+        ...cultures.map((c) => c.name.toLowerCase()),
+        ...world.settlements.map((s) => s.name.toLowerCase()),
+        ...world.provinces.map((p) => p.name.toLowerCase()),
+      ]);
+      expect(taken.has(core.toLowerCase()), `title "${title}" reuses a name`).toBe(false);
     });
   });
 }
