@@ -67,7 +67,13 @@ const OCEAN_MOISTURE = 1.0;
 const LAKE_MOISTURE = 0.8;
 const MOISTURE_FLOOR = 0.04;
 const CARRY = 0.985;
-const RAIN_SHADOW = 2.5;
+/** Re-fitted 2026-09-18 for the tectonic terrain of stage 3.5 (was 2.5, fitted 2026-09-16 against
+ *  the Gaussian continent blobs). Plate-boundary uplift makes real ridge lines, so a hop across a
+ *  belt is a much bigger rise than anything the old smooth mask produced and 2.5 drove a fifth of
+ *  the land to the moisture floor. Over the four fitting seeds this moves deserts 21.1% -> 17.1%
+ *  and forest 49.6% -> 54.0%. RISE_ALLOWANCE is deliberately left alone: it is far more sensitive
+ *  (0.04 -> 0.07 collapses deserts to 5% and pushes forest to 73%). */
+const RAIN_SHADOW = 2.0;
 /** Per-hop rise that costs no carried moisture (the reshape's inland climb); see the file comment. */
 const RISE_ALLOWANCE = 0.04;
 const CONTINENTALITY_PX = 260;

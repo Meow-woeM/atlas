@@ -379,7 +379,8 @@ export interface RenderOptions {
 | 1 | Points | `mesh/poisson.ts` | `points` | params | `Float64Array` xy, numBoundary | 8 ms |
 | 2 | Mesh | `mesh/dualmesh.ts` | — | points | `Mesh` | 12 ms |
 | 3 | Noisy edges | `mesh/noisy.ts` | `edges` | mesh | `NoisyEdges` | 8 ms |
-| 4 | Elevation | `gen/elevation.ts` | `elevation` | mesh, params | `r_elevation r_water r_coastHops r_slope r_lat r_lon` | 25 ms |
+| 3.5 | Plates | `gen/tectonics.ts` | `tectonics` | mesh, params | `Tectonics` (r_plate, velocities, r_craton, r_stress) | 15 ms |
+| 4 | Elevation | `gen/elevation.ts` | `elevation` | mesh, params, tectonics | `r_elevation r_water r_coastHops r_slope r_lat r_lon formation` | 25 ms |
 | 5 | Distance field | `core/raster.ts` via `gen/elevation.ts` | — | mesh, r_water | `distField r_coastDist` | 15 ms |
 | 6 | Climate | `gen/climate.ts` | `climate` | geo | `r_temperature r_moisture windDir` | 5 ms |
 | 7 | Hydrology | `gen/hydrology.ts` | — | mesh, geo | `t_elevation t_downslope_s t_flux t_lake s_river s_riverId r_water(lakes)`, river/lake cell sets | 15 ms |
@@ -392,7 +393,7 @@ export interface RenderOptions {
 | 14 | Political view | `gen/features.ts` | — | mesh, edges, politics | `PoliticalView` (held by main, not in World) | 5 ms |
 | 15 | History log | `gen/world.ts` | — | all | `history.events` (~200 year-0 events) | 1 ms |
 
-Total ≈ 140 ms generation on a 2020 laptop; the 2 s budget is a 10x margin. Stages 12 and 13 execute in the order **features, names**: `assignNames` needs the rivers, lakes, seas and ranges to exist, while `extractFeatures` needs only the mesh, the noisy edges, the geography and the hydrology result; every stage draws from its own fork, so the numbering above is the naming order and `generate` records `timings` under the keys `points, mesh, edges, elevation, distance, climate, hydrology, biomes, features, provinces, settlements, politics, names, history` in execution order.
+Total ≈ 140 ms generation on a 2020 laptop; the 2 s budget is a 10x margin. Stages 12 and 13 execute in the order **features, names**: `assignNames` needs the rivers, lakes, seas and ranges to exist, while `extractFeatures` needs only the mesh, the noisy edges, the geography and the hydrology result; every stage draws from its own fork, so the numbering above is the naming order and `generate` records `timings` under the keys `points, mesh, edges, tectonics, elevation, distance, climate, hydrology, biomes, features, provinces, settlements, politics, names, history` in execution order.
 
 ### Stage 0 — Seed and streams
 
@@ -400,7 +401,9 @@ Total ≈ 140 ms generation on a 2020 laptop; the 2 s budget is a 10x margin. St
 
 ### Stage 1 — Points
 
-Bridson Poisson-disc in `[0,W]x[0,H]`, `r = cellSpacing`, `k = 30`, background grid `r/√2`, active list consumed with `rng.int`. Then the boundary ring at spacing `r`, `2r` outside the rectangle, prepended so ring regions are `[0, numBoundaryRegions)`. Output: `{ points: Float64Array, numBoundary }`.
+Bridson Poisson-disc in `[0,W]x[0,H]`, `r = cellSpacing`, background grid `r/√2`, active list consumed with `rng.int`. Then the boundary ring at spacing `r`, `2r` outside the rectangle, prepended so ring regions are `[0, numBoundaryRegions)`. Output: `{ points: Float64Array, numBoundary }`.
+
+**Retuned (2026-09-18, `ATLAS_VERSION` 2).** The candidate loop is Roberts' few-candidate variant rather than Bridson's `k = 30` uniform one: `k = 6` candidates per active point, their angles stratified one per `2π/k` sector from a random base angle, and the radius drawn from the narrow annulus `[r, 1.3r)` instead of `[r, 2r)`. Stratified angles plus near-`r` radii pack as densely in 6 candidates as uniform sampling does in 30. The neighbour scan is the 5×5 grid block minus its four corner cells — a point in cell `(gx±2, gy±2)` is always more than `(r/√2)·√2 = r` away — walked centre outwards so a candidate blocked by a near neighbour returns on the first cells. Measured at the default parameters over five seeds: **46.4 ms → 10.6 ms** (−77%), interior points 7,742 → 8,254, min pairwise distance still `≥ r`, worst uncovered gap 9.2 px → 10.4 px, nearest-neighbour CV 0.077 → 0.055 (slightly *more* even than Bridson). Still ~1.3× the 8 ms budget.
 
 ### Stage 2 — Mesh
 
@@ -409,6 +412,17 @@ Bridson Poisson-disc in `[0,W]x[0,H]`, `r = cellSpacing`, `k = 30`, background g
 ### Stage 3 — Noisy edges
 
 For each canonical side (`s < s_opposite_s[s]` or hull), take the quad `(r_a, t_in, r_b, t_out)` and recursively displace the midpoint of `t_in→t_out` toward a random point on the `r_a→r_b` segment (amplitude 0.5 of the quad, 2 levels). Output `NoisyEdges`. `fork(seed,'edges')`.
+
+### Stage 3.5 — Plates (added 2026-09-18)
+
+The roadmap's Tectonics item, landed. `plates` seed cells are grown by one multi-source BFS over the cell graph (seeds pushed in plate order, so an equidistant cell joins the lower index and every region ends on exactly one connected plate). Each plate gets a drift heading and speed — rigid-body, no rotation. Per cell, stress is the neighbour across a plate boundary with the largest |convergence|, where convergence is `dot(v[mine] − v[theirs], unit vector from me to them)`: positive closes (uplift, a mountain belt), negative opens (a rift). Interior cells start at 0 and gain stress only by diffusion, which is what gives a belt a width instead of a one-cell seam. Cratons come from a per-plate continental/oceanic flag, also diffused so a continent's edge is a gradient rather than a plate-shaped cliff.
+
+Two things about the continental cores are load-bearing, both learned by measuring:
+
+- **They must be spread, not drawn at random.** Adjacent cratons merge into a supercontinent whose interior sits ~230 px from any coast, which stage 6 turns into a continent-sized desert. Cores are chosen by farthest-point sampling over the plate seeds: the first is drawn, the rest draw nothing.
+- **Their count must track `landFraction`, not `continents`.** With 2 cores covering 22% of the map against a 42% land target, the sea-level quantile has to promote that much noise-driven land, and it arrives as stringy fragments rather than as coastline — settlements on a coast ran 62-79%. At `round(plates × landFraction)` = 4 cores that falls to 37-67% and inland settlements clear 30% on every seed. `params.continents` is now a **floor** on the core count, not the count.
+
+`r_circulate_r` breaks its walk at the hull, so on the boundary ring it reports `r → q` without `q → r` — exactly 464 one-way pairs on the default mesh. Any graph algorithm over the cell graph that assumes symmetry has this trap; the plate-connectivity test symmetrises first.
 
 ### Stage 4 — Elevation
 
@@ -420,6 +434,8 @@ For each canonical side (`s < s_opposite_s[s]` or hull), take the quad `(r_a, t_
 6. **Coast hops**: multi-source BFS from ocean cells → `r_coastHops`.
 7. **Reshape** (mapgen2's coast-distance trick): rank land cells by `raw`, `rankNorm ∈ [0,1]`; `r_elevation = 0.55·rankNorm^1.5 + 0.45·(hops/maxHops)^0.8`; water cells get `−(sea − raw)/sea` clamped to `[-1, 0)`.
 8. `r_slope[r] = max |r_elevation[r] − r_elevation[nbr]|`.
+
+**The formation timeline (added 2026-09-18).** The three fields raw height mixes — basement noise, craton and uplift — do not depend on time; only how much of each is mixed in does. So `Formation` stores the three fields once and `rawAtStep` evaluates a moment in one pass over the cells, instead of storing a snapshot per step. Sea level is **absolute**: the `landFraction` quantile of raw at the LAST step, which every earlier step is measured against. That is what makes the land appear to form — the sea does not fall, the continents rise through it — and it is why the last step reproduces the world as if there were no timeline at all. Land fraction is therefore monotonic in the step and lands on `params.landFraction` at the end; `elevation.test.ts` asserts both. `FORMATION_STEPS` is 24 and `params.formationStep` selects the moment; `landMaskAtStep` is the cheap land/sea read the UI scroll bar previews with while it is being dragged.
 
 ### Stage 5 — Distance field
 
@@ -455,10 +471,12 @@ Score every land cell: `2.0·fertility[biome] + 0.05·coast + 0.5·riverSide + 0
 ### Stage 11 — Cultures and nations
 
 - `K = clamp(round(n / 5), 3, nationsMax)` capitals = highest-scoring settlements re-chosen with a 150 px spacing, one per province at most.
-- One culture per capital (`cultures.length === K` on day one); `home_p` = capital's province; `p_culture` by Dijkstra over the province graph with cost `1 + hostility(biome) + 3·(mountain link)`, so culture edges follow mountains and deserts.
+- One culture per capital; `home_p` = capital's province; `p_culture` by Dijkstra over the province graph with cost `1 + hostility(biome) + 3·(mountain link)`, so culture edges follow mountains and deserts.
 - Nations: Dijkstra over the **province graph** from the K capitals, link cost `1 + 3·cultureMismatch + 2·(shared border < 20 px) + 4·(either province mean elev > 0.6)`, ocean impassable, capped at 12 hops; every province joins the nearest capital → `p_nation`. Provinces on islands unreachable from any capital become free cities (`p_nation` = a new nation whose capital is the island's best settlement) if they have a settlement, else unclaimed (`-1`).
 - `derivePolitics` fills `r_nation` from `p_nation` through `r_province`.
 - Emit events: `culture.emerged`, `nation.founded`, one `province.claimed` per province (`cause` = the nation's founding seq), `settlement.founded` for every settlement.
+
+**Corrected 2026-09-18 (review).** The doc used to say `cultures.length === K`. It is `cultures.length === nations.length`: every free city gets its own culture too, because names.ts needs a language per nation. For the same reason `nationsMax` caps only the **primary**, capital-seeded nations (`K = clamp(round(n / 5), 3, nationsMax)`, the `nationsMax` clamp applied last so it wins over the minimum of 3) — free cities are appended after it, so `nations.length` may exceed `nationsMax`. Measured at seed `probe`: `continents: 1` gives 9 nations and `continents: 3` gives 10 against the default `nationsMax` of 8. That is the intended behaviour (an island with a town is a polity), not a bug; it is the doc and the `nationsMax` comment that were wrong.
 
 Nothing in this stage writes to any geography object, and nothing outside `Politics` stores a nation index except `Settlement.culture` (a founding fact).
 
@@ -657,6 +675,7 @@ export function t_circulate_t(mesh: Mesh, t: number, out: number[]): number[];  
 export function t_circulate_s(mesh: Mesh, t: number, out: number[]): number[];   // 3 sides leaving t
 export function r_is_boundary(mesh: Mesh, r: number): boolean;
 export function cellPolygon(mesh: Mesh, r: number, out: Float32Array): number;   // writes xy pairs, returns point count
+export function cellCentroids(mesh: Mesh, out?: { r_px: Float32Array; r_py: Float32Array }): { r_px: Float32Array; r_py: Float32Array };  // the sanctioned cell position
 export function cellLatLon(mesh: Mesh, params: WorldParams, r: number): [lat: number, lon: number];
 export function cellUnitVector(mesh: Mesh, params: WorldParams, r: number, out: Float64Array): Float64Array;
 export function downwindOrder(mesh: Mesh, dir: WindDir): Int32Array;   // interior cells sorted upwind -> downwind
@@ -666,12 +685,25 @@ export function buildNoisyEdges(mesh: Mesh, rng: Rng, amplitude?: number, levels
 export function sidePath(edges: NoisyEdges, mesh: Mesh, s: number, out: number[]): number[];  // pushes xy from s_inner_t to s_outer_t
 export function chainSides(mesh: Mesh, edges: NoisyEdges, isChainSide: (s: number) => boolean): Polyline[]; // generic loop/chain builder (raw, unsmoothed)
 
+// gen/tectonics.ts
+export interface Tectonics {
+  numPlates: number;
+  r_plate: Int16Array;         // plate index per cell; every region is on exactly one plate
+  plateVx: Float32Array; plateVy: Float32Array;   // per plate drift
+  plateOceanic: Uint8Array;    // per plate, 1 oceanic, 0 continental
+  r_craton: Float32Array;      // 0..1 continental basement, diffused
+  r_stress: Float32Array;      // convergence (+) / rift (-), diffused
+}
+export function computeTectonics(mesh: Mesh, params: WorldParams, rng: Rng): Tectonics;
+
 // gen/elevation.ts
+export function rawAtStep(f: Formation, step: number, out?: Float32Array): Float32Array;
+export function landMaskAtStep(mesh: Mesh, f: Formation, step: number, out?: Uint8Array): Uint8Array;  // 1 land, 0 water
 export interface ElevationResult {
   r_elevation: Float32Array; r_water: Uint8Array; r_coastHops: Int16Array; r_slope: Float32Array;
   r_lat: Float32Array; r_lon: Float32Array;
 }
-export function computeElevation(mesh: Mesh, params: WorldParams, rng: Rng): ElevationResult;
+export function computeElevation(mesh: Mesh, params: WorldParams, rng: Rng, tec: Tectonics): ElevationResult;
 export function computeDistanceField(mesh: Mesh, params: WorldParams, r_water: Uint8Array): { distField: Raster; r_coastDist: Float32Array };
 
 // gen/climate.ts
@@ -763,6 +795,37 @@ export function downloadBlob(blob: Blob, filename: string): void;
 // - canvas sized to fit the container, drawn at devicePixelRatio
 ```
 
+```ts
+// gen/edits.ts — the post-generation edit overlay (added 2026-09-18)
+export interface Edits {
+  names: Record<string, string>;      // Id -> replacement, e.g. 'settlement:12'
+  p_nation: Record<string, number>;   // province index -> nation index, -1 unclaimed
+  r_nation: Record<string, number>;   // cell index -> nation index, -1 unclaimed (fine brush)
+}
+export function emptyEdits(): Edits;
+export function editsAreEmpty(e: Edits): boolean;
+export function applyEdits(world: World, edits: Edits): void;
+export function serializeEdits(e: Edits): string;
+export function parseEdits(text: string): Edits;          // tolerant; drops unknown/out-of-range keys
+
+// gen/names.ts
+export function applyNameEdits(world: World, edits: Edits): void;
+// gen/politics.ts — still the ONLY writer of political state
+export function applyPoliticalEdits(world: World, edits: Edits): void;
+// p_nation overrides, then derivePolitics, then r_nation overrides: the fine brush wins over the
+// province it sits in.
+
+// render/painter.ts
+export function renderFormationPreview(mesh: Mesh, r_land: Uint8Array, ctx: CanvasRenderingContext2D,
+  opts: { scale: number; width: number; height: number }): void;
+// Paints a mask gen computed (landMaskAtStep); the renderer still computes no geography.
+
+// ui/editor.ts — builds its own DOM into #sidebar; not unit tested (node environment, no DOM)
+export function initEditor(hooks: EditorHooks): void;
+```
+
+See `docs/EDITING.md` for the edit layer's own notes.
+
 ## 8. Day-one cut
 
 **IN**
@@ -789,7 +852,7 @@ Tectonic plates; real wind/temperature simulation; roads and trade routes; the y
 
 | Item | Where it plugs in | What stays untouched |
 |---|---|---|
-| **Tectonics** | Replaces the continent-mask step inside `computeElevation`: K plate seeds + BFS growth over the cell graph (a Voronoi-of-cells), plate velocity vectors, uplift/rift on sides where plates differ (dot of relative velocity with the side normal), diffused over the cell graph, added to `raw` before the quantile. Plates become `NamedArea`-like entities for the wiki. | Everything after stage 4. |
+| **Tectonics — LANDED 2026-09-18, see stage 3.5** | Replaces the continent-mask step inside `computeElevation`: K plate seeds + BFS growth over the cell graph (a Voronoi-of-cells), plate velocity vectors, uplift/rift on sides where plates differ (dot of relative velocity with the side normal), diffused over the cell graph, added to `raw` before the quantile. Plates become `NamedArea`-like entities for the wiki. | Everything after stage 4. |
 | **Climate sim** | Replaces `computeClimate` behind the same signature: latitude wind belts (trades/westerlies/polar) as per-band `downwindOrder` sweeps; temperature with ocean-proximity term; seasonal pass optional. | Hydrology, biomes, all human stages. |
 | **Hillshade** | `rasterizeTriangles(mesh, t_elevation, raster)` at 1/2 output resolution → Horn gradient → Lambertian → `multiply` at α 0.25 as layer 4b, toggle `relief`. Default faint; glyphs remain the primary relief vocabulary. | Everything; one layer function. |
 | **Roads and trade** | New `gen/roads.ts`: A*/Dijkstra over the cell graph with cost from slope, biome, river crossings (a bridge is a side with `s_river > 0`); sea lanes over ocean cells between ports; MST over settlements + k-NN extras; `Road { id, cells: Int32Array, kind }` in `World.roads`; one render layer between borders and settlements; `road.built` events. | All existing stages. |
@@ -817,8 +880,9 @@ Tectonic plates; real wind/temperature simulation; roads and trade routes; the y
 - Every stage receives a forked `Rng`; never share one stream across stages, never draw from a parent stream after forking children from it.
 - Per-entity randomness (names, glyph jitter for a given cell) forks by stable id: `fork(seed, 'names', 'river:3')`, `fork(seed, 'ink', 'relief')`.
 - Sorts that affect output use typed-array index sorts with explicit numeric tie-breaks on the index (`(a, b) => key[a] - key[b] || a - b`); never rely on `Array.prototype.sort` stability for objects.
-- No `Math.sin`-based hashes; no `Date`, `performance.now()` only for `timings`.
+- No `Math.sin`-based hashes; no `Date`, `performance.now()` only for `timings`. All three rules are enforced by `src/no-math-random.test.ts`, which greps every non-test file under `src/`.
 - Changing what a stage draws from its stream, or the stage order, bumps `ATLAS_VERSION` and `params.version`.
+- **Caveat on "every machine" (found in the 2026-09-18 review).** `Math.sqrt` is correctly rounded by IEEE 754, but `Math.sin`, `Math.cos`, `Math.pow`, `Math.exp`, `Math.log`, `Math.atan2` and `Math.acos` are only *implementation-approximated* in ECMAScript, so a different engine may return a different last bit. Generation uses them in `mesh/poisson.ts` (candidate offsets), `mesh/dualmesh.ts` (lat/lon), `gen/elevation.ts`, `gen/climate.ts`, `core/geom.ts` and `core/rng.ts` (`gaussian`). In practice V8, SpiderMonkey and JavaScriptCore all ship fdlibm-derived versions and agree, which is why the same seed does reproduce across browsers today — but it is an engine convention, not a spec guarantee. Making it a guarantee means shipping our own `sin`/`cos`/`exp`/`log`, which is a `params.version` bump and is not worth it until someone reports a mismatch; the tests would catch it as a cross-machine digest difference, not as a local failure.
 
 **Data and memory**
 

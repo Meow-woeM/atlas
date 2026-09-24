@@ -39,7 +39,7 @@
  */
 
 import type {
-  LayerToggles, Polyline, PoliticalView, RenderOptions, World,
+  LayerToggles, Mesh, Polyline, PoliticalView, RenderOptions, World,
 } from '../core/types';
 import { BIOMES } from '../core/types';
 import { fork } from '../core/rng';
@@ -952,4 +952,45 @@ export function renderWorld(world: World, view: PoliticalView, ctx: CanvasRender
   if (layers.grid) runLayer(p, 'graticule', drawGraticule);
   if (layers.labels) runLayer(p, 'labels', drawLabelsLayer);
   if (layers.furniture) runLayer(p, 'furniture', drawFurniture);
+}
+
+/**
+ * Land/sea silhouette for the formation scroll bar while it is being dragged.
+ *
+ * Regenerating a whole world per scroll tick costs ~200 ms, which makes the bar feel broken, so
+ * dragging draws this instead and the full pipeline runs once the bar is released. It is a
+ * deliberately thin slice of renderWorld: the same transform and parchment, cell polygons filled
+ * land or sea, and nothing else — no rivers, labels, borders or relief, because none of those
+ * exist until the stages downstream of elevation have run at that step.
+ *
+ * `r_land` is the mask gen/elevation.ts computed (landMaskAtStep); this function only paints it.
+ * The renderer still computes no geography, in keeping with the boundary in CLAUDE.md.
+ */
+export function renderFormationPreview(
+  mesh: Mesh, r_land: Uint8Array, ctx: CanvasRenderingContext2D, opts: { scale: number; width: number; height: number },
+): void {
+  const k = opts.scale;
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.filter = 'none';
+  ctx.setLineDash([]);
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+
+  ctx.fillStyle = SEA_INK;
+  ctx.fillRect(0, 0, opts.width, opts.height);
+
+  const poly = new Float32Array(64);
+  ctx.fillStyle = PARCHMENT;
+  ctx.beginPath();
+  for (let r = mesh.numBoundaryRegions; r < mesh.numRegions; r++) {
+    if (r_land[r] !== 1) continue;
+    const n = cellPolygon(mesh, r, poly);
+    if (n < 3) continue;
+    ctx.moveTo(poly[0], poly[1]);
+    for (let i = 1; i < n; i++) ctx.lineTo(poly[2 * i], poly[2 * i + 1]);
+    ctx.closePath();
+  }
+  ctx.fill();
 }

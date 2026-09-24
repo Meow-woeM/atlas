@@ -26,9 +26,10 @@ interface SpatialIndex {
   y: Float32Array;
 }
 
+/** Edits are keyed by the formation step as well as the seed: province and nation indices are
+ *  rebuilt from scratch at every step, so an edit made at one moment means nothing at another. */
 function storageKey(world: World): string {
-  const extended = world.params as typeof world.params & { formationStep?: number };
-  return `atlas/edits/v${ATLAS_VERSION}/${world.seed}/${extended.formationStep ?? 0}`;
+  return `atlas/edits/v${ATLAS_VERSION}/${world.seed}/${world.params.formationStep}`;
 }
 
 function load(world: World): Edits {

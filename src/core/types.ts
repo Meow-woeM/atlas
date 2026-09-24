@@ -2,7 +2,12 @@
 // The contract every module codes against. Plain data only (typed arrays + POJOs):
 // structured-cloneable, no classes, no enums, no methods on world data.
 
-export const ATLAS_VERSION = 1;
+export const ATLAS_VERSION = 3;
+
+/** Positions on the land-formation timeline. Step 0 is the earliest, the last is the present
+ *  day: the world every seed generated before the timeline existed. The UI scroll bar has no
+ *  dates on it, so these are positions along a story, not a geological clock. */
+export const FORMATION_STEPS = 24;
 
 // ---------------------------------------------------------------- parameters
 
@@ -19,20 +24,23 @@ export interface WorldParams {
   cellSpacing: number;        // Poisson-disc radius r in logical px (8)
   rasterScale: number;        // raster scratch resolution relative to logical px (0.5)
   frame: GeoFrame;            // default { lon0: -20, lon1: 20, lat0: 58, lat1: 28 }
-  landFraction: number;       // 0.42; sea level = matching quantile of raw height
-  continents: 1 | 2 | 3;
+  landFraction: number;       // 0.42; sea level = matching quantile of raw height at the last step
+  continents: 1 | 2 | 3;      // continental plates = continents + 1
+  plates: number;             // tectonic plates (9); stage 3.5 grows them over the cell graph
+  formationStep: number;      // 0..FORMATION_STEPS-1, the moment on the formation timeline
   windDir: WindDir | 'random';
   lakesMax: number;           // 8
   riverPercentile: number;    // 0.94
   provinceSpacing: number;    // Poisson radius for province sites in logical px (48 -> ~140 provinces)
   settlementsMax: number;     // 40
-  nationsMax: number;         // 8
+  nationsMax: number;         // 8. Caps the capital-seeded nations only; free cities are added on top.
 }
 
 export const DEFAULT_PARAMS: WorldParams = {
   version: ATLAS_VERSION, width: 1024, height: 768, cellSpacing: 8, rasterScale: 0.5,
   frame: { lon0: -20, lon1: 20, lat0: 58, lat1: 28 },
-  landFraction: 0.42, continents: 2, windDir: 'random', lakesMax: 8, riverPercentile: 0.94,
+  landFraction: 0.42, continents: 2, plates: 9, formationStep: FORMATION_STEPS - 1,
+  windDir: 'random', lakesMax: 8, riverPercentile: 0.94,
   provinceSpacing: 48, settlementsMax: 40, nationsMax: 8,
 };
 
@@ -74,6 +82,21 @@ export type BiomeIndex = number;
 
 export interface Raster { w: number; h: number; scale: number; data: Float32Array; }
 
+/**
+ * The time-independent parts of raw height, plus the absolute sea level every step is read against.
+ * gen/elevation.ts builds it and rawAtStep / landMaskAtStep evaluate a moment from it, so the
+ * formation timeline never stores a snapshot per step. Plain typed arrays: structured-cloneable,
+ * and cheap enough to re-evaluate on every tick of the scroll bar.
+ */
+export interface Formation {
+  steps: number;
+  r_noise: Float32Array;     // basement fBm, min-max normalised to 0..1 over interior cells
+  r_craton: Float32Array;    // continental basement 0..1 (from Tectonics)
+  r_uplift: Float32Array;    // tectonic uplift, + convergent / - rift, shaped by craton
+  r_falloff: Float32Array;   // edge falloff, 0 at the rectangle's margin up to 1 inland
+  seaLevel: number;          // absolute: the landFraction quantile of raw at the LAST step
+}
+
 export interface Geography {
   // per cell r, length mesh.numRegions
   r_elevation: Float32Array;   // -1..1, 0 = sea level, water < 0
@@ -96,6 +119,7 @@ export interface Geography {
   s_riverId: Int16Array;       // river index or -1
   windDir: WindDir;            // the resolved prevailing wind
   distField: Raster;           // signed EDT of the land mask at params.rasterScale
+  formation: Formation;        // lets any step of the land-formation timeline be re-evaluated
 }
 
 // ---------------------------------------------------------------- features (derived vector geometry)

@@ -5,12 +5,21 @@
  * distance field draws nothing). Consumption order, frozen (changing it is a params.version bump):
  *   1. makeSimplex3(rng)                    — the 256-entry permutation shuffle (255 draws).
  *   2. domain-warp offsets                  — 9 x rng.float(-100, 100): o1.xyz, o2.xyz, o3.xyz.
- *   3. continent blobs, i = 0..continents-1 — per blob, in order: rng.float(cx range),
- *                                             rng.float(cy range), rng.float(0.8, 1.2) sigma factor.
+ * Nothing else is drawn here: the continent shapes come from gen/tectonics.ts, which has its own
+ * `tectonics` stream, so stage 4 is otherwise a pure function of the noise and the plates.
  *
- * Inputs:  Mesh, WorldParams (frame, width/height, continents, landFraction, rasterScale).
- * Outputs: ElevationResult (r_elevation, r_water, r_coastHops, r_slope, r_lat, r_lon) and, from
- *          computeDistanceField, { distField, r_coastDist }.
+ * Inputs:  Mesh, WorldParams (frame, width/height, landFraction, formationStep, rasterScale), Rng,
+ *          and the Tectonics of stage 3.5.
+ * Outputs: ElevationResult (r_elevation, r_water, r_coastHops, r_slope, r_lat, r_lon, formation)
+ *          and, from computeDistanceField, { distField, r_coastDist }.
+ *
+ * THE FORMATION TIMELINE. The three fields raw height is mixed from — basement noise, continental
+ * craton and tectonic uplift — do not depend on time; only how much of each is mixed in does. So
+ * `Formation` stores the three fields once and `rawAtStep` evaluates a moment in one pass over the
+ * cells, instead of storing FORMATION_STEPS snapshots. Sea level is ABSOLUTE: it is the quantile
+ * that gives params.landFraction at the LAST step, and every earlier step is measured against that
+ * same level. That is what makes the land appear to form — the sea does not fall, the continents
+ * rise through it — and it is why the last step reproduces the world as if there were no timeline.
  *
  * Stage 4, exactly as ARCHITECTURE.md section 5 lists it:
  *   1. r_lat / r_lon through cellLatLon; the noise position is cellUnitVector(r) (the unit sphere).
@@ -20,14 +29,18 @@
  *      p' = p + 0.08 (fbm4(p + o1), fbm4(p + o2), fbm4(p + o3)) with 4-octave warps, so a cell
  *      costs 3 x 4 + 6 = 18 simplex evaluations. fbm is min-max normalized over interior cells
  *      to 0..1 before mixing.
- *   3. Continent mask: params.continents Gaussian blobs, max-combined. Blob i's center lies in
- *      the i-th vertical slice of the inner 70% of the canvas (so two continents read as two),
- *      sigma = 0.28 / sqrt(continents) * min(W, H) * U(0.8, 1.2). An edge falloff (0 within
- *      MARGIN = 40 px of the rectangle, smoothstep up to 1 by MARGIN + ramp) multiplies the whole
- *      raw height — not only the mask term — which is what makes the >= 40 px ocean margin a
- *      guarantee rather than a tendency: raw = (0.65 fbmN + 0.35 blobs) * falloff.
- *   4. sea = quantile(raw over interior cells, 1 - landFraction); r_water = raw < sea ? 1 : 0;
- *      the boundary ring is forced to water.
+ *   3. Craton and uplift from stage 3.5 replace the Gaussian continent blobs of ATLAS_VERSION <= 2.
+ *      uplift = (stress > 0 ? stress : RIFT_W * stress) * (0.5 + 0.5 craton): convergence lifts,
+ *      rifts drop less than they lift, and both bite harder on continental crust than on ocean
+ *      floor, so collisions read as mountain belts and oceanic boundaries as island arcs. An edge
+ *      falloff (0 within MARGIN = 40 px of the rectangle, smoothstep up to 1 by MARGIN + ramp)
+ *      multiplies the whole raw height — not only one term — which is what makes the >= 40 px
+ *      ocean margin a guarantee rather than a tendency:
+ *        raw(u) = (W_NOISE fbmN nRamp(u) + W_CRATON craton cRamp(u) + W_UPLIFT uplift uRamp(u)) falloff
+ *      with u = step / (FORMATION_STEPS - 1). The ramps are the whole timeline: the basement is
+ *      mostly there from the start, the craton thickens, the mountains accumulate from nothing.
+ *   4. sea = quantile(raw at the LAST step over interior cells, 1 - landFraction), then
+ *      r_water = raw(step) < sea ? 1 : 0; the boundary ring is forced to water.
  *   5. Ocean flood fill (BFS) from the ring across water cells: reached = 1 (ocean); unreached
  *      water = 2 (lake candidate; hydrology confirms or reverts it).
  *   6. r_coastHops: multi-source BFS from ocean cells over every cell (0 on ocean, >= 1 else).
@@ -49,19 +62,33 @@
  */
 
 import type { Rng } from '../core/rng';
-import type { Mesh, Raster, WorldParams } from '../core/types';
+import type { Formation, Mesh, Raster, WorldParams } from '../core/types';
+export type { Formation };
+import { FORMATION_STEPS } from '../core/types';
+import type { Tectonics } from './tectonics';
 import { makeSimplex3, fbm3 } from '../core/noise';
 import { quantile } from '../core/geom';
 import { makeRaster, rasterizeCells, edt, sampleBilinear } from '../core/raster';
-import { cellLatLon, cellUnitVector, cellPolygon, r_circulate_r } from '../mesh/dualmesh';
+import { cellLatLon, cellUnitVector, cellCentroids, r_circulate_r } from '../mesh/dualmesh';
 
 export interface ElevationResult {
   r_elevation: Float32Array; r_water: Uint8Array; r_coastHops: Int16Array; r_slope: Float32Array;
   r_lat: Float32Array; r_lon: Float32Array;
+  formation: Formation;
 }
 
 /** Ocean margin guaranteed inside the rectangle, logical px. */
 const MARGIN = 40;
+/** Mixing weights for raw height. Absolute scale is irrelevant (sea level is a quantile); what
+ *  matters is their ratio, and that the ramps below make the total grow with time. */
+const W_NOISE = 0.42;
+const W_CRATON = 0.34;
+const W_UPLIFT = 0.30;
+/** A rift drops less than a collision lifts. */
+const RIFT_W = 0.55;
+/** Ramp floors at step 0: how much of each field the world starts with. */
+const NOISE_FLOOR = 0.55;
+const CRATON_FLOOR = 0.30;
 /** Domain-warp amplitude in noise units (ARCHITECTURE.md stage 4 step 2). */
 const WARP = 0.08;
 /** Water elevation ceiling: strictly below sea level. */
@@ -69,32 +96,59 @@ const WATER_EPS = -1e-4;
 /** r_coastDist for boundary-ring cells (outside the raster). */
 const RING_COAST_DIST = -1000;
 
-/** Cell positions as the average of the cellPolygon corners (the sanctioned way to get one). */
-function cellPositions(mesh: Mesh): { r_px: Float32Array; r_py: Float32Array } {
-  const n = mesh.numRegions;
-  const r_px = new Float32Array(n);
-  const r_py = new Float32Array(n);
-  const poly = new Float32Array(64);
-  for (let r = 0; r < n; r++) {
-    const k = cellPolygon(mesh, r, poly);
-    if (k === 0) continue;
-    let sx = 0, sy = 0;
-    for (let i = 0; i < k; i++) {
-      sx += poly[2 * i];
-      sy += poly[2 * i + 1];
-    }
-    r_px[r] = sx / k;
-    r_py[r] = sy / k;
-  }
-  return { r_px, r_py };
-}
-
 function smoothstep(t: number): number {
   const s = t < 0 ? 0 : t > 1 ? 1 : t;
   return s * s * (3 - 2 * s);
 }
 
-export function computeElevation(mesh: Mesh, params: WorldParams, rng: Rng): ElevationResult {
+/** Position on the timeline, 0 at the earliest step and 1 at the present day. */
+function stepFraction(step: number, steps: number): number {
+  if (steps <= 1) return 1;
+  const k = step < 0 ? 0 : step > steps - 1 ? steps - 1 : step;
+  return k / (steps - 1);
+}
+
+/**
+ * Raw height at one moment: one pass over the cells mixing the three time-independent fields under
+ * the ramps. The basement is mostly there from the start (NOISE_FLOOR), the craton thickens along a
+ * smoothstep, and uplift accumulates from nothing, slightly faster than linearly at the end so the
+ * young mountains arrive late. Fills `out` when given, allocates otherwise.
+ */
+export function rawAtStep(f: Formation, step: number, out?: Float32Array): Float32Array {
+  const n = f.r_noise.length;
+  const raw = out ?? new Float32Array(n);
+  const u = stepFraction(step, f.steps);
+  const nRamp = NOISE_FLOOR + (1 - NOISE_FLOOR) * u;
+  const cRamp = CRATON_FLOOR + (1 - CRATON_FLOOR) * smoothstep(u);
+  const uRamp = Math.pow(u, 1.15);
+  for (let r = 0; r < n; r++) {
+    raw[r] = (W_NOISE * f.r_noise[r] * nRamp
+      + W_CRATON * f.r_craton[r] * cRamp
+      + W_UPLIFT * f.r_uplift[r] * uRamp) * f.r_falloff[r];
+  }
+  return raw;
+}
+
+/**
+ * Land mask at one moment: 1 land, 0 water, with the boundary ring always water. This is the cheap
+ * read the formation scroll bar previews with while it is being dragged — no flood fill, so it does
+ * not separate ocean from inland water, and no downstream stage is run. Geography is computed here,
+ * in gen, and never in the renderer.
+ */
+export function landMaskAtStep(
+  mesh: Mesh, f: Formation, step: number, out?: Uint8Array,
+): Uint8Array {
+  const n = f.r_noise.length;
+  const mask = out ?? new Uint8Array(n);
+  const raw = rawAtStep(f, step);
+  const nb = mesh.numBoundaryRegions;
+  for (let r = 0; r < n; r++) mask[r] = r >= nb && raw[r] >= f.seaLevel ? 1 : 0;
+  return mask;
+}
+
+export function computeElevation(
+  mesh: Mesh, params: WorldParams, rng: Rng, tec: Tectonics,
+): ElevationResult {
   const n = mesh.numRegions;
   const nb = mesh.numBoundaryRegions;
   const W = params.width, H = params.height;
@@ -136,40 +190,39 @@ export function computeElevation(mesh: Mesh, params: WorldParams, rng: Rng): Ele
   }
   const fScale = fMax > fMin ? 1 / (fMax - fMin) : 0;
 
-  // ---- 3. continent mask (RNG draw 3) and edge falloff
-  const { r_px, r_py } = cellPositions(mesh);
-  const numBlobs = params.continents;
-  const blobX = new Float64Array(numBlobs);
-  const blobY = new Float64Array(numBlobs);
-  const blobInv2s2 = new Float64Array(numBlobs);
-  const innerX0 = 0.15 * W, innerX1 = 0.85 * W;
-  const slice = (innerX1 - innerX0) / numBlobs;
-  const sigmaBase = (0.28 / Math.sqrt(numBlobs)) * Math.min(W, H);
-  for (let i = 0; i < numBlobs; i++) {
-    blobX[i] = rng.float(innerX0 + i * slice, innerX0 + (i + 1) * slice);
-    blobY[i] = rng.float(0.15 * H, 0.85 * H);
-    const sigma = sigmaBase * rng.float(0.8, 1.2);
-    blobInv2s2[i] = 1 / (2 * sigma * sigma);
-  }
+  // ---- 3. the formation fields: craton and uplift from the plates, plus the edge falloff
+  const { r_px, r_py } = cellCentroids(mesh);
   const ramp = Math.max(40, Math.min(100, 0.12 * Math.min(W, H)));
   const invRamp = 1 / ramp;
 
+  const r_noise = new Float32Array(n);
+  const r_falloff = new Float32Array(n);
+  const r_uplift = new Float32Array(n);
   for (let r = 0; r < n; r++) {
-    const x = r_px[r], y = r_py[r];
-    let blob = 0;
-    for (let i = 0; i < numBlobs; i++) {
-      const dx = x - blobX[i], dy = y - blobY[i];
-      const g = Math.exp(-(dx * dx + dy * dy) * blobInv2s2[i]);
-      if (g > blob) blob = g;
-    }
-    const de = Math.min(x, W - x, y, H - y);
-    const falloff = smoothstep((de - MARGIN) * invRamp);
-    const fbmN = (raw[r] - fMin) * fScale;
-    raw[r] = (0.65 * fbmN + 0.35 * blob) * falloff;
+    r_noise[r] = (raw[r] - fMin) * fScale;
+    const de = Math.min(r_px[r], W - r_px[r], r_py[r], H - r_py[r]);
+    r_falloff[r] = smoothstep((de - MARGIN) * invRamp);
+    const stress = tec.r_stress[r];
+    const signed = stress > 0 ? stress : RIFT_W * stress;
+    r_uplift[r] = signed * (0.5 + 0.5 * tec.r_craton[r]);
   }
 
-  // ---- 4. sea level by quantile over interior cells
-  const sea = quantile(raw.subarray(nb), 1 - params.landFraction);
+  const formation: Formation = {
+    steps: FORMATION_STEPS,
+    r_noise,
+    r_craton: tec.r_craton,
+    r_uplift,
+    r_falloff,
+    seaLevel: 0,
+  };
+
+  // ---- 4. sea level, ABSOLUTE: the landFraction quantile at the LAST step, so every earlier step
+  // shows less land against the same sea rather than a sea that rises and falls with the land.
+  const rawFinal = rawAtStep(formation, FORMATION_STEPS - 1);
+  formation.seaLevel = quantile(rawFinal.subarray(nb), 1 - params.landFraction);
+  const sea = formation.seaLevel;
+
+  rawAtStep(formation, params.formationStep, raw);
   const r_water = new Uint8Array(n);
   for (let r = 0; r < n; r++) r_water[r] = r < nb || raw[r] < sea ? 1 : 0;
 
@@ -259,7 +312,7 @@ export function computeElevation(mesh: Mesh, params: WorldParams, rng: Rng): Ele
     r_slope[r] = m;
   }
 
-  return { r_elevation, r_water, r_coastHops, r_slope, r_lat, r_lon };
+  return { r_elevation, r_water, r_coastHops, r_slope, r_lat, r_lon, formation };
 }
 
 export function computeDistanceField(
@@ -282,7 +335,7 @@ export function computeDistanceField(
   const data = distField.data;
   for (let p = 0; p < data.length; p++) data[p] *= inv;
 
-  const { r_px, r_py } = cellPositions(mesh);
+  const { r_px, r_py } = cellCentroids(mesh);
   const r_coastDist = new Float32Array(n);
   for (let r = 0; r < n; r++) {
     r_coastDist[r] = r < nb ? RING_COAST_DIST : sampleBilinear(distField, r_px[r], r_py[r]);
