@@ -65,7 +65,12 @@
           <label><input type="checkbox" id="layer-furniture" /> Furniture</label>
         </fieldset>
 
-        <pre id="timings" aria-live="polite"></pre>
+        <!-- Diagnostics, folded away: nobody generating worlds needs stage timings in their face.
+             main.ts opens it when an error has to be shown. -->
+        <details id="timings-details">
+          <summary>Timings</summary>
+          <pre id="timings" aria-live="polite"></pre>
+        </details>
       </form>
 
       <footer class="about">
@@ -91,7 +96,7 @@
       <div id="overlay" hidden><span>Rendering&hellip;</span></div>
       <div id="formation">
         <label for="formation-step">Formation</label>
-        <input id="formation-step" type="range" min="0" max="23" step="1" value="23"
+        <input id="formation-step" type="range" min="0" max="95" step="1" value="95"
                aria-label="How far the land has formed" />
         <button type="button" id="formation-now" title="Back to the present day">Present</button>
       </div>

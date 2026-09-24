@@ -436,9 +436,11 @@ Two things about the continental cores are load-bearing, both learned by measuri
 7. **Reshape** (mapgen2's coast-distance trick): rank land cells by `raw`, `rankNorm ∈ [0,1]`; `r_elevation = 0.55·rankNorm^1.5 + 0.45·(hops/maxHops)^0.8`; water cells get `−(sea − raw)/sea` clamped to `[-1, 0)`.
 8. `r_slope[r] = max |r_elevation[r] − r_elevation[nbr]|`.
 
-**The formation timeline (added 2026-09-18).** The three fields raw height mixes — basement noise, craton and uplift — do not depend on time; only how much of each is mixed in does. So `Formation` stores the three fields once and `rawAtStep` evaluates a moment in one pass over the cells, instead of storing a snapshot per step. Sea level is **absolute**: the `landFraction` quantile of raw at the LAST step, which every earlier step is measured against, and it is why the last step reproduces the world as if there were no timeline at all. Land fraction is monotonic in the step on the tuning seeds and lands on `params.landFraction` at the end; `elevation.test.ts` asserts both. `FORMATION_STEPS` is 24 and `params.formationStep` selects the moment; `landMaskAtStep` is the cheap land/sea read the UI scroll bar previews with while it is being dragged.
+**The formation timeline (added 2026-09-18).** The three fields raw height mixes — basement noise, craton and uplift — do not depend on time; only how much of each is mixed in does. So `Formation` stores the three fields once and `rawAtStep` evaluates a moment in one pass over the cells, instead of storing a snapshot per step. Sea level is **absolute**: the `landFraction` quantile of raw at the LAST step, which every earlier step is measured against, and it is why the last step reproduces the world as if there were no timeline at all. Land fraction is monotonic in the step up to a hair (with plate drift a step may lose at most 0.3% of the map, and the present is above every earlier step) and lands on `params.landFraction` at the end; `elevation.test.ts` asserts both. `FORMATION_STEPS` is 96 (24 until the live scrub; finer steps make the drift smoother at the same frame rate) and `params.formationStep` selects the moment. `landMaskAtStep` is the cheap land/sea read (kept for tests and tools); the UI no longer previews with it — see the live scrub below.
 
 **Plate drift (added 2026-09-23).** The first timeline only ramped the three fields up, so every world's story was islands rising out of an empty sea. Now the crust rides its plate. A plate of velocity `v` still has `drift × (1 − u)` px of travel ahead of it at position `u` on the timeline (`drift` = 160 logical px per unit speed; speeds are 0.4–1), so the crust sitting at cell `r` then is the crust that will END at `q = r + v · drift · (1 − u)`: `rawAtStep` reads the final noise and craton of the cell nearest `q` through `Formation.lookup` (a uniform grid over the centroids, `buildCellLookup` / `nearestCell` in `mesh/dualmesh.ts`, bucket 2 × `cellSpacing`). When `q` lies on another plate that crust does not exist yet — it is the ocean the collision has since closed — and `r` reads as bare sea floor: its own basement noise and no craton. Uplift stays where the belts are (the plate boundaries) and ramps up as the plates arrive. So converging continents close an ocean and raise mountains where they meet, diverging ones split along their rift, and the present day (`u = 1`, displacement 0) is the stored fields bit for bit — the lookup never touches the final world, so no `ATLAS_VERSION` bump. The ramp floors moved with it (basement 0.55 → 0.75, craton 0.30 → 0.70): the continents are there from the first step and move, rather than rise from nothing. Measured at the defaults over the four tuning seeds: land 0.16–0.22 at step 0, 0.42 at the last, no step loses land overall, and 3–7% of cells are land at some earlier step and sea by the present (the crust that moved). A step evaluates in ~1.2 ms.
+
+**Live scrub (2026-09-23, later the same day).** The scroll bar no longer shows a silhouette while dragged; it shows the real world of each step changing under the pointer. Stage 4 is split into `buildFormation` (the RNG draws, the noise, the fields, the lookup, the absolute sea — once per seed) and `elevationAtStep` (water mask, flood fill, hops, reshape, slope — per moment, no RNG), and `gen/world.ts` is split the same way: `prepareBase` runs points, mesh, edges, tectonics and `buildFormation`; `generateFromBase(base, params, geographyOnly?)` runs `elevationAtStep` through history, or with `geographyOnly` stops after features and leaves provinces, settlements, politics, names and history empty. `generate` is `generateFromBase(prepareBase(...))`, so a base world at step `s` is identical to `generate(seed, { formationStep: s })` (`world.test.ts` asserts it). Each animation frame of a drag calls `generateFromBase(..., true)` at the bar's step and renders the geography layers through `renderWorld` with the political, label and furniture layers off, plus `renderFrame`; when the drag ends the full pipeline runs at that step and only borders, towns, labels and the cartouche are added on top of what is already drawn. Frames coalesce (one scheduled at a time, the latest value wins), so a slow step never builds a backlog.
 
 ### Stage 5 — Distance field
 
@@ -712,7 +714,9 @@ export interface ElevationResult {
   r_elevation: Float32Array; r_water: Uint8Array; r_coastHops: Int16Array; r_slope: Float32Array;
   r_lat: Float32Array; r_lon: Float32Array;
 }
-export function computeElevation(mesh: Mesh, params: WorldParams, rng: Rng, tec: Tectonics): ElevationResult;
+export function buildFormation(mesh: Mesh, params: WorldParams, rng: Rng, tec: Tectonics): Formation;   // the RNG draws and the noise, once
+export function elevationAtStep(mesh: Mesh, params: WorldParams, formation: Formation, step: number): ElevationResult;   // per moment, no RNG
+export function computeElevation(mesh: Mesh, params: WorldParams, rng: Rng, tec: Tectonics): ElevationResult;   // = elevationAtStep(buildFormation(...), params.formationStep)
 export function computeDistanceField(mesh: Mesh, params: WorldParams, r_water: Uint8Array): { distField: Raster; r_coastDist: Float32Array };
 
 // gen/climate.ts
@@ -761,6 +765,10 @@ export function poleOfInaccessibility(mesh: Mesh, cells: Int32Array): number;   
 
 // gen/world.ts
 export function generate(seed: string, params?: Partial<WorldParams>): World;
+export interface WorldBase { seed: string; params: WorldParams; mesh: Mesh; edges: NoisyEdges; tectonics: Tectonics; formation: Formation; timings: Record<string, number> }
+export function prepareBase(seed: string, params?: Partial<WorldParams>): WorldBase;   // points, mesh, edges, tectonics, buildFormation
+export function generateFromBase(base: WorldBase, params: WorldParams, geographyOnly?: boolean): World;   // params may differ from base.params only in formationStep / nations
+export function baseKey(p: WorldParams): string;   // the params a base depends on, as a stable string
 export function withParams(overrides: Partial<WorldParams>): WorldParams;
 export function toWorldFile(world: World): WorldFile;
 export function fromWorldFile(file: WorldFile): World;    // regenerate + restore politics if present
@@ -825,11 +833,9 @@ export function applyPoliticalEdits(world: World, edits: Edits): void;
 // province it sits in.
 
 // render/painter.ts
-export function renderFormationPreview(mesh: Mesh, r_land: Uint8Array, ctx: CanvasRenderingContext2D,
-  opts: { scale: number; width: number; height: number; seed: string }): void;
-// Paints a mask gen computed (landMaskAtStep) in the map's own materials — the seeded parchment
-// sheet, ocean wash, parchment land, an ink coast, the frame — so settling only adds detail.
-// The renderer still computes no geography.
+export function renderFrame(ctx: CanvasRenderingContext2D, opts: { scale: number; width: number; height: number }): void;
+// The frame alone, drawn over the live-scrub geography (renderWorld with the political, label and
+// furniture layers off) so the border never blinks while the formation bar is dragged.
 
 // ui/editor.ts — builds its own DOM into #sidebar; not unit tested (node environment, no DOM)
 export function initEditor(hooks: EditorHooks): void;

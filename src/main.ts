@@ -4,16 +4,16 @@
  * mint an 8-letter seed when the URL hash has none (or when Randomize is pressed).
  * Inputs: location.hash (#seed=<s>&land=<f>&wind=<d>&cells=<r>&step=<n>&nations=<k>) and the controls
  * in index.html.
- * Outputs: the rendered <canvas id="map">, the <pre id="timings"> readout, location.hash on every
- * generate, and PNG downloads via render/export.
+ * Outputs: the rendered <canvas id="map">, the <pre id="timings"> readout (folded into a <details>,
+ * opened on error), location.hash on every generate, and PNG downloads via render/export.
  */
 import './style.css';
 import type { LayerToggles, PoliticalView, WindDir, World, WorldParams } from './core/types';
 import { DEFAULT_PARAMS, FORMATION_STEPS } from './core/types';
-import { generate } from './gen/world';
-import { landMaskAtStep } from './gen/elevation';
+import { baseKey, generateFromBase, prepareBase } from './gen/world';
+import type { WorldBase } from './gen/world';
 import { buildPoliticalView } from './gen/features';
-import { renderWorld, renderFormationPreview, DEFAULT_LAYERS } from './render/painter';
+import { renderWorld, renderFrame, DEFAULT_LAYERS } from './render/painter';
 import { exportPng, downloadBlob } from './render/export';
 import type { Edits } from './gen/edits';
 import { applyEdits, emptyEdits } from './gen/edits';
@@ -52,6 +52,7 @@ const generateBtn = byId<HTMLButtonElement>('generate');
 const scaleSelect = byId<HTMLSelectElement>('scale');
 const exportBtn = byId<HTMLButtonElement>('export');
 const timingsPre = byId<HTMLPreElement>('timings');
+const timingsDetails = byId<HTMLDetailsElement>('timings-details');
 const controlsForm = byId<HTMLFormElement>('controls');
 const stage = byId<HTMLElement>('stage');
 const canvas = byId<HTMLCanvasElement>('map');
@@ -64,6 +65,9 @@ for (const key of LAYER_KEYS) layerBoxes[key] = byId<HTMLInputElement>('layer-' 
 // ---------------------------------------------------------------- state
 
 let params: WorldParams = { ...DEFAULT_PARAMS, frame: { ...DEFAULT_PARAMS.frame } };
+/** The step-independent half of the current seed's world; rebuilt only when the seed or a base
+ *  parameter changes, reused across formation steps and nation counts. */
+let base: WorldBase | null = null;
 let world: World | null = null;
 let view: PoliticalView | null = null;
 let fontReady = false;
@@ -73,9 +77,13 @@ let exportMs = 0;
 let exportBusy = false;
 let lastCanvasW = 0;
 let lastCanvasH = 0;
-/** Set while the formation bar is being dragged: the canvas is showing a silhouette, not a world. */
+/** Set while the formation bar is being dragged: the canvas shows the live geography of the
+ *  bar's step (generated per frame from `base`), not the settled world. */
 let scrubbing = false;
 let scrubTimer = 0;
+let scrubStep = -1;        // the step the live geography on the canvas was generated at
+let scrubQueued = false;   // a frame is already scheduled
+let scrubMs = 0;           // last per-step cost (generate + render)
 const edits: Edits = emptyEdits();
 
 // ---------------------------------------------------------------- seed and hash
@@ -219,6 +227,7 @@ function showTimings(): void {
   lines.push('  ' + 'screen'.padEnd(12) + fmtMs(renderMs) + '  ' + canvas.width + 'x' + canvas.height);
   if (exportMs > 0) lines.push('  ' + 'export'.padEnd(12) + fmtMs(exportMs));
   lines.push('  ' + 'font'.padEnd(12) + (fontReady ? 'IM Fell English' : 'fallback serif'));
+  if (scrubMs > 0) lines.push('  ' + 'scrub'.padEnd(12) + fmtMs(scrubMs) + '  per step, geography only');
   timingsPre.classList.remove('error');
   timingsPre.textContent = lines.join('\n');
 }
@@ -228,6 +237,7 @@ function showError(where: string, err: unknown): void {
   const seedLine = 'seed   ' + seedInput.value + '\n';
   timingsPre.classList.add('error');
   timingsPre.textContent = seedLine + 'error in ' + where + ': ' + e.message + '\n\n' + (e.stack ?? '');
+  timingsDetails.open = true;   // the readout is folded away by default; an error must be seen
   console.error('[atlas] ' + where, err);
 }
 
@@ -258,10 +268,11 @@ function fitCanvas(): number {
 
 function render(): void {
   if (!world || !view) return;
-  // Mid-drag the canvas is showing a formation silhouette; a resize must not repaint the present
-  // day over it, or the map would flicker back and forth while the bar is moving.
+  // Mid-drag the canvas shows the live geography of the bar's step; a resize must not repaint the
+  // settled world over it, or the map would flicker back and forth while the bar is moving.
   if (scrubbing) {
-    previewFormation(Math.round(Number(formationRange.value)));
+    scrubStep = -1;
+    scrubTick();
     return;
   }
   try {
@@ -283,35 +294,52 @@ function render(): void {
 
 /**
  * The bar has no dates on it: it is a position in the land's formation, from the earliest step to
- * the present day. Dragging it would be unusable if every tick regenerated the world (~200 ms a
- * frame), so a drag paints only the land/sea silhouette at that step, which costs one pass over
- * the cells, and the full pipeline runs once the drag settles.
+ * the present day. Dragging it shows the real world of each step changing under the pointer —
+ * coasts moving, mountains rising, rivers growing and shrinking, forests and deserts shifting —
+ * not a silhouette. Each animation frame regenerates the bar's current step from `base` (the
+ * step-independent half of the world: mesh, edges, plates, the formation fields) with
+ * generateFromBase(..., geographyOnly): elevation through features, no provinces, towns, nations
+ * or names, which are the settled world's business. Frames coalesce: input events only mark the
+ * bar dirty, one frame is scheduled at a time, and a frame that finds the bar where it left it
+ * draws nothing, so a slow step never queues a backlog.
  *
- * The silhouette comes from landMaskAtStep in gen/elevation.ts. Reusing the CURRENT world's
- * formation is exactly right: the plates and the three height fields do not depend on the step, so
- * scrubbing never needs the earlier stages re-run — only the ramps change.
+ * The geography layers are rendered exactly as renderWorld renders them for the settled world,
+ * with the political, label and furniture layers off, so when the drag ends and the full pipeline
+ * runs at that step the coast, relief, rivers and tints are already on the canvas and only the
+ * borders, towns, labels and cartouche are added.
  */
-const SCRUB_SETTLE_MS = 180;
+const SCRUB_SAFETY_MS = 1000;
 
-function previewFormation(step: number): void {
-  if (!world) return;
+function renderLive(w: World, v: PoliticalView): void {
+  const scale = fitCanvas();
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('canvas 2d context unavailable');
+  const layers = { ...readLayers(), borders: false, provinces: false, settlements: false, labels: false, furniture: false };
+  renderWorld(w, v, ctx, { scale, layers, fontReady });
+  renderFrame(ctx, { scale, width: params.width, height: params.height });
+  lastCanvasW = canvas.width;
+  lastCanvasH = canvas.height;
+}
+
+function scrubTick(): void {
+  scrubQueued = false;
+  if (!scrubbing || !base) return;
+  const step = Math.round(Number(formationRange.value));
+  if (step === scrubStep) return;
   try {
-    const scale = fitCanvas();
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    const mask = landMaskAtStep(world.mesh, world.geo.formation, step);
-    renderFormationPreview(world.mesh, mask, ctx, {
-      scale, width: params.width, height: params.height, seed: world.seed,
-    });
-    lastCanvasW = canvas.width;
-    lastCanvasH = canvas.height;
+    const t0 = performance.now();
+    const w = generateFromBase(base, { ...params, formationStep: step }, true);
+    renderLive(w, buildPoliticalView(w));
+    scrubStep = step;
+    scrubMs = performance.now() - t0;
   } catch (err) {
-    showError('formation preview', err);
+    showError('scrub', err);
   }
 }
 
 function commitFormation(step: number): void {
   scrubbing = false;
+  scrubStep = -1;
   if (params.formationStep === step && world) {
     render();
     return;
@@ -321,14 +349,17 @@ function commitFormation(step: number): void {
 }
 
 function onFormationInput(): void {
-  const step = Math.round(Number(formationRange.value));
   scrubbing = true;
-  previewFormation(step);
+  if (!scrubQueued) {
+    scrubQueued = true;
+    requestAnimationFrame(scrubTick);
+  }
+  // 'change' commits when the drag ends; this is a safety net for the rare case it never fires.
   if (scrubTimer !== 0) clearTimeout(scrubTimer);
   scrubTimer = setTimeout(() => {
     scrubTimer = 0;
     commitFormation(Math.round(Number(formationRange.value)));
-  }, SCRUB_SETTLE_MS) as unknown as number;
+  }, SCRUB_SAFETY_MS) as unknown as number;
 }
 
 function syncFormationControl(): void {
@@ -353,7 +384,10 @@ function doGenerate(): void {
   generateBtn.disabled = true;
   try {
     const t0 = performance.now();
-    world = generate(seed, params);
+    if (base === null || base.seed !== seed || baseKey(base.params) !== baseKey(params)) {
+      base = prepareBase(seed, params);
+    }
+    world = generateFromBase(base, params);
     view = buildPoliticalView(world);
     generateMs = performance.now() - t0;
     exportMs = 0;
@@ -362,6 +396,7 @@ function doGenerate(): void {
     syncNationsControl();
     window.dispatchEvent(new Event('atlas-world-changed'));
   } catch (err) {
+    base = null;
     world = null;
     view = null;
     showError('generate', err);
@@ -411,8 +446,7 @@ controlsForm.addEventListener('submit', (ev) => {
 });
 
 formationRange.addEventListener('input', onFormationInput);
-// A keyboard user gets 'change' on arrow keys too, but 'input' already fired and armed the timer;
-// committing here just skips the settle delay when the drag ends.
+// The drag ends (or an arrow key lands): run the full pipeline at this step.
 formationRange.addEventListener('change', () => {
   if (scrubTimer !== 0) { clearTimeout(scrubTimer); scrubTimer = 0; }
   commitFormation(Math.round(Number(formationRange.value)));

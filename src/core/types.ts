@@ -7,7 +7,7 @@ export const ATLAS_VERSION = 3;
 /** Positions on the land-formation timeline. Step 0 is the earliest, the last is the present
  *  day: the world every seed generated before the timeline existed. The UI scroll bar has no
  *  dates on it, so these are positions along a story, not a geological clock. */
-export const FORMATION_STEPS = 24;
+export const FORMATION_STEPS = 96;   // 24 until 2026-09-23; finer steps make the drift read smoothly under a drag
 
 // ---------------------------------------------------------------- parameters
 

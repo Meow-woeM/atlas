@@ -348,21 +348,26 @@ describe('formation timeline', () => {
     return land / (mesh.numRegions - mesh.numBoundaryRegions);
   }
 
-  it('never loses land as time runs forward', () => {
+  it('never loses more than a hair of land as time runs forward, and the present tops every step', () => {
     // The promise the scroll bar makes: the world grows toward the present against a fixed sea.
     // Sea level is absolute (the landFraction quantile at the last step) and every ramp in
     // rawAtStep is non-decreasing in u. Individual cells DO come and go now that the crust rides
-    // its plate (see the churn test below), but the total never drops on the tuning seeds.
-    let drops = 0;
+    // its plate (see the churn test below), so between two of the 96 steps the total can dip by
+    // a few cells; it never dips by more than 0.3% of the map, and no step beats the present.
+    let worstDrop = 0;
+    let abovePresent = 0;
     for (const { mesh, elev } of built) {
+      const last = landFractionAt(mesh, elev.formation, FORMATION_STEPS - 1);
       let prev = -1;
       for (let step = 0; step < FORMATION_STEPS; step++) {
         const frac = landFractionAt(mesh, elev.formation, step);
-        if (frac < prev - 1e-9) drops++;
+        if (prev >= 0 && prev - frac > worstDrop) worstDrop = prev - frac;
+        if (frac > last + 1e-9) abovePresent++;
         prev = frac;
       }
     }
-    expect(drops).toBe(0);
+    expect(worstDrop).toBeLessThan(0.003);
+    expect(abovePresent).toBe(0);
   });
 
   it('starts with proto-continents already there, well short of the present, and ends at params.landFraction', () => {

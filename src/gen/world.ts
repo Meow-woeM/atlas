@@ -50,13 +50,23 @@
  * the stages' RNG consumption changed, so the geometry would not match the saved politics (a
  * migrations table is roadmap, section 9).
  *
+ * Base and step (2026-09-23): generate = generateFromBase(prepareBase(seed, params), params).
+ * prepareBase runs the step-independent stages once (points, mesh, edges, tectonics, the
+ * formation of stage 4 with its RNG draws) and generateFromBase runs everything from
+ * elevationAtStep on for one moment of the timeline — the same code path generate takes, so a
+ * world from a base at step s is identical to generate(seed, { formationStep: s }). The formation
+ * scroll bar re-runs generateFromBase per tick with geographyOnly, which stops after features
+ * (provinces, settlements, politics, names and history are left empty) and is what the live
+ * geography under the drag is rendered from. The params handed to generateFromBase may differ
+ * from the base's only in formationStep and nations (the two the UI changes without a new base).
+ *
  * Inputs:  seed string and Partial<WorldParams> (generate); World (toWorldFile); WorldFile
  *          (fromWorldFile).
  * Outputs: a World (section 4) with every field filled and named; a WorldFile; a WorldParams.
  */
 
 import type {
-  Geography, HistoryLog, World, WorldEvent, WorldFile, WorldParams,
+  Formation, Geography, HistoryLog, NoisyEdges, Politics, ProvinceGraph, World, WorldEvent, WorldFile, WorldParams,
 } from '../core/types';
 import { ATLAS_VERSION, DEFAULT_PARAMS } from '../core/types';
 import type { Mesh } from '../core/types';
@@ -65,7 +75,8 @@ import { generatePoints } from '../mesh/poisson';
 import { buildMesh, r_circulate_r } from '../mesh/dualmesh';
 import { buildNoisyEdges } from '../mesh/noisy';
 import { computeTectonics } from './tectonics';
-import { computeElevation, computeDistanceField } from './elevation';
+import type { Tectonics } from './tectonics';
+import { buildFormation, elevationAtStep, computeDistanceField } from './elevation';
 import type { ElevationResult } from './elevation';
 import { computeClimate, computeBiomes } from './climate';
 import { computeHydrology } from './hydrology';
@@ -98,7 +109,31 @@ export function withParams(overrides: Partial<WorldParams>): WorldParams {
 
 // ---------------------------------------------------------------- generate
 
-export function generate(seed: string, params?: Partial<WorldParams>): World {
+/** The step-independent half of a world: everything before elevationAtStep, plus its timings. */
+export interface WorldBase {
+  seed: string;
+  params: WorldParams;
+  mesh: Mesh;
+  edges: NoisyEdges;
+  tectonics: Tectonics;
+  formation: Formation;
+  timings: Record<string, number>;   // points, mesh, edges, tectonics, elevation (the formation's share)
+}
+
+/** The params fields a base is built from: everything except the two generateFromBase may vary. */
+export function baseKey(p: WorldParams): string {
+  const { formationStep: _step, nations: _nations, ...rest } = p;
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(rest).sort()) {
+    const value = (rest as Record<string, unknown>)[key];
+    sorted[key] = value !== null && typeof value === 'object'
+      ? Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : value;
+  }
+  return JSON.stringify(sorted);
+}
+
+export function prepareBase(seed: string, params?: Partial<WorldParams>): WorldBase {
   const p = withParams(params ?? {});
   const timings: Record<string, number> = {};
   let mark = performance.now();
@@ -116,10 +151,44 @@ export function generate(seed: string, params?: Partial<WorldParams>): World {
   const edges = buildNoisyEdges(mesh, fork(seed, 'edges'));
   lap('edges');
 
-  // 3.5-6: plates, elevation, distance field, climate
+  // 3.5 and the time-independent half of 4
   const tectonics = computeTectonics(mesh, p, fork(seed, 'tectonics'));
   lap('tectonics');
-  const elev = computeElevation(mesh, p, fork(seed, 'elevation'), tectonics);
+  const formation = buildFormation(mesh, p, fork(seed, 'elevation'), tectonics);
+  lap('elevation');
+
+  return { seed, params: p, mesh, edges, tectonics, formation, timings };
+}
+
+/** Empty stage 9-11 state for a geography-only world: no provinces, towns or nations. */
+function emptyPolitics(numRegions: number): { r_province: Int16Array; graph: ProvinceGraph; politics: Politics } {
+  return {
+    r_province: new Int16Array(numRegions).fill(-1),
+    graph: { p_first: new Int32Array(1), p_nbr: new Int32Array(0), p_border: new Float32Array(0) },
+    politics: {
+      year: 0, cultures: [], nations: [], p_nation: new Int16Array(0), p_culture: new Int16Array(0),
+      r_nation: new Int16Array(numRegions).fill(-1), r_settlement: new Int16Array(numRegions).fill(-1),
+    },
+  };
+}
+
+export function generateFromBase(base: WorldBase, params: WorldParams, geographyOnly = false): World {
+  if (baseKey(params) !== baseKey(base.params)) {
+    throw new Error('generateFromBase: params differ from the base in more than formationStep / nations');
+  }
+  const seed = base.seed;
+  const p: WorldParams = { ...params, frame: { ...params.frame } };
+  const { mesh, edges } = base;
+  const timings: Record<string, number> = { ...base.timings };
+  let mark = performance.now();
+  const lap = (name: (typeof STAGE_NAMES)[number]): void => {
+    const now = performance.now();
+    timings[name] = (timings[name] ?? 0) + (now - mark);
+    mark = now;
+  };
+
+  // 4-6: this moment's elevation, distance field, climate
+  const elev = elevationAtStep(mesh, p, base.formation, p.formationStep);
   lap('elevation');
   const { distField, r_coastDist } = computeDistanceField(mesh, p, elev.r_water);
   lap('distance');
@@ -132,17 +201,26 @@ export function generate(seed: string, params?: Partial<WorldParams>): World {
 
   // 7: hydrology, then the geography assembly (reverted lake candidates lifted back onto land)
   const hydro = computeHydrology(mesh, p, elev.r_elevation, elev.r_water, climate.r_moisture);
-  const base = assembleGeography(mesh, elev, hydro, climate, distField, r_coastDist);
+  const geoBase = assembleGeography(mesh, elev, hydro, climate, distField, r_coastDist);
   lap('hydrology');
 
   // 8: biomes, after hydrology so lakes and river sides are final
-  const r_biome = computeBiomes(mesh, base);
-  const geo: Geography = { ...base, r_biome };
+  const r_biome = computeBiomes(mesh, geoBase);
+  const geo: Geography = { ...geoBase, r_biome };
   lap('biomes');
 
   // 13: features (needs mesh, edges, geography and the hydrology result only)
   const features = extractFeatures({ mesh, edges, geo, params: p }, hydro);
   lap('features');
+
+  const history: HistoryLog = { events: [] };
+  if (geographyOnly) {
+    const empty = emptyPolitics(mesh.numRegions);
+    return {
+      seed, params: p, mesh, edges, geo, features, provinces: [], graph: empty.graph,
+      r_province: empty.r_province, settlements: [], politics: empty.politics, history, timings,
+    };
+  }
 
   // 9-11: provinces, settlements (fills Province.seat), nations (fills Settlement.culture)
   const { provinces, r_province, graph } = computeProvinces(mesh, edges, p, geo, fork(seed, 'provinces'));
@@ -157,7 +235,6 @@ export function generate(seed: string, params?: Partial<WorldParams>): World {
   lap('politics');
 
   // 12: names (needs features AND politics), then 15: history
-  const history: HistoryLog = { events: [] };
   const world: World = {
     seed, params: p, mesh, edges, geo, features, provinces, graph, r_province, settlements,
     politics, history, timings,
@@ -168,6 +245,11 @@ export function generate(seed: string, params?: Partial<WorldParams>): World {
   lap('history');
 
   return world;
+}
+
+export function generate(seed: string, params?: Partial<WorldParams>): World {
+  const base = prepareBase(seed, params);
+  return generateFromBase(base, base.params);
 }
 
 // ---------------------------------------------------------------- geography assembly
